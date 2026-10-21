@@ -1,5 +1,5 @@
 // Drop or choose a photo or a short clip. Built on react-dropzone (headless); the look is the tactile well.
-import { MAX_CLIP_DURATION_MS } from "@ambar/core";
+import { MAX_CLIP_DURATION_MS, MAX_FILE_BYTES } from "@ambar/core";
 import { UploadSimpleIcon } from "@phosphor-icons/react";
 import { useDropzone, type FileError, type FileRejection } from "react-dropzone";
 
@@ -7,11 +7,9 @@ import { WELL } from "../lib/tactile.ts";
 import { cn } from "../lib/utils.ts";
 import { Button } from "./button.tsx";
 
-const MAX_FILE_BYTES = 100 * 1024 * 1024;
-
 const MESSAGES = {
   "file-invalid-type": "Only photos and clips for now.",
-  "file-too-large": "That file is over 100 MB.",
+  "file-too-large": `That file is over ${MAX_FILE_BYTES / 1024 / 1024} MB.`,
   "too-many-files": "One moment at a time.",
   "clip-too-long": `Clips can be up to ${MAX_CLIP_DURATION_MS / 1000} seconds.`,
 } as const;

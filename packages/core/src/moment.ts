@@ -82,6 +82,9 @@ export type FileMoment = MomentBase & {
 
 export type Moment = PhotoMoment | ClipMoment | LinkMoment | FileMoment;
 
+/** Largest file Ambar keeps, in bytes. The API enforces the same limit (apps/api checks that it matches). */
+export const MAX_FILE_BYTES = 100 * 1024 * 1024;
+
 /** Maximum length of a clip, in milliseconds. */
 export const MAX_CLIP_DURATION_MS = 30_000;
 

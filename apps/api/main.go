@@ -21,6 +21,8 @@ import (
 	"ambar/api/mail"
 	"ambar/api/migrations"
 	"ambar/api/oauth"
+	"ambar/api/storage"
+	"ambar/api/uploads"
 )
 
 func main() {
@@ -66,6 +68,11 @@ func run(ctx context.Context, getenv func(string) string) error {
 		return err
 	}
 
+	bucket, err := mediaStorage(getenv, production)
+	if err != nil {
+		return err
+	}
+
 	// The pool connects lazily: the API starts even if Postgres is down, and /healthz reports it.
 	db, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -80,12 +87,18 @@ func run(ctx context.Context, getenv func(string) string) error {
 
 	authService := auth.NewService(db, mailer, secret, appURL)
 
-	go cleanupLoop(ctx, authService)
+	var uploadService *uploads.Service
+	if bucket != nil {
+		uploadService = uploads.NewService(db, bucket)
+	}
+
+	go cleanupLoop(ctx, authService, uploadService)
 
 	handler := newRouter(&api{
 		logger:         logger,
 		db:             db,
 		auth:           authService,
+		uploads:        uploadService,
 		providers:      providers,
 		appURL:         strings.TrimSuffix(appURL, "/"),
 		allowedOrigins: splitList(env["ALLOWED_ORIGINS"]),
@@ -167,8 +180,9 @@ func oauthProviders(getenv func(string) string) (map[string]*oauth.Provider, err
 	return providers, nil
 }
 
-// cleanupLoop runs auth cleanup once at start and then every auth.CleanupEvery until ctx ends.
-func cleanupLoop(ctx context.Context, service *auth.Service) {
+// cleanupLoop runs the hourly cleanups once at start and then every auth.CleanupEvery until ctx ends.
+// uploadService is nil when storage isn't configured.
+func cleanupLoop(ctx context.Context, service *auth.Service, uploadService *uploads.Service) {
 	ticker := time.NewTicker(auth.CleanupEvery)
 	defer ticker.Stop()
 
@@ -180,12 +194,53 @@ func cleanupLoop(ctx context.Context, service *auth.Service) {
 			slog.InfoContext(ctx, "auth cleanup", "event", "auth.cleanup", "challenges", challenges, "sessions", sessions)
 		}
 
+		if uploadService != nil {
+			expired, deleted, err := uploadService.Cleanup(ctx)
+			if err != nil {
+				slog.WarnContext(ctx, "upload cleanup failed", "err", err)
+			} else if expired > 0 || deleted > 0 {
+				slog.InfoContext(ctx, "upload cleanup", "event", "upload.expired", "expired", expired, "deleted", deleted)
+			}
+		}
+
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
 	}
+}
+
+// mediaStorage connects to the R2 bucket when its four variables are set. Development may run without it
+// (uploads then answer 503); production refuses to start.
+func mediaStorage(getenv func(string) string, production bool) (*storage.Client, error) {
+	keys := []string{"R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET"}
+	values := make(map[string]string, len(keys))
+
+	var missing []string
+
+	for _, key := range keys {
+		if values[key] = getenv(key); values[key] == "" {
+			missing = append(missing, key)
+		}
+	}
+
+	switch {
+	case len(missing) == 0:
+		if !strings.HasPrefix(values["R2_ENDPOINT"], "https://") {
+			return nil, errors.New("R2_ENDPOINT must be the bucket's https S3 endpoint")
+		}
+
+		return storage.New(values["R2_ENDPOINT"], values["R2_ACCESS_KEY_ID"], values["R2_SECRET_ACCESS_KEY"], values["R2_BUCKET"]), nil
+	case production:
+		return nil, fmt.Errorf("missing %s: media storage is required in production", strings.Join(missing, ", "))
+	case len(missing) < len(keys):
+		return nil, fmt.Errorf("set all of R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY and R2_BUCKET, or none (missing %s)", strings.Join(missing, ", "))
+	}
+
+	slog.Warn("R2_* unset: uploads are off")
+
+	return nil, nil
 }
 
 // authSecret keys the sign-in code hashes. Development gets a random one per run (codes from a previous

@@ -16,5 +16,8 @@ Read by `apps/api/main.go` at startup. There are no built-in addresses, URLs or 
 | `MAIL_FROM` | production | Sender; its domain must be verified in Resend |
 | `TRUST_PROXY` | no | `true` only when the API is reachable solely through our reverse proxy, which sets `X-Real-IP` |
 | `LOG_FORMAT` | no | `text` (default) or `json` for the log collector on the VPS |
+| `R2_ENDPOINT` | production | The bucket's S3 endpoint for its jurisdiction: `https://<account>.eu.r2.cloudflarestorage.com`. With the three below, all or none; none turns uploads off (development only, they answer `storage-unavailable`) |
+| `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | production | The bucket's R2 access key pair (Object Read & Write on that bucket only). See [Set up media storage](../how-to/set-up-media-storage.md) |
+| `R2_BUCKET` | production | The bucket for this environment, a non-production one while developing ([Set up media storage](../how-to/set-up-media-storage.md)) |
 
 Keep this table and `.env.example` in step with `main.go`.

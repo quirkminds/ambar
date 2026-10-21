@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"ambar/api/vaults"
 )
 
 // store is the SQL for the auth tables (migrations/00001_auth.sql). Time comes from the database
@@ -219,6 +221,13 @@ func upsertUser(ctx context.Context, tx pgx.Tx, email string) (userID string, cr
 		ON CONFLICT (email) DO UPDATE SET email_verified_at = coalesce(users.email_verified_at, now())
 		RETURNING id::text, (xmax = 0)`, email).Scan(&userID, &created); err != nil {
 		return "", false, fmt.Errorf("upsert user: %w", err)
+	}
+
+	// Sign up: the account and its vault are created together, or neither is.
+	if created {
+		if err := vaults.CreatePersonal(ctx, tx, userID); err != nil {
+			return "", false, err
+		}
 	}
 
 	return userID, created, nil

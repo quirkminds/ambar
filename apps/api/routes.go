@@ -16,6 +16,7 @@ import (
 
 	"ambar/api/auth"
 	"ambar/api/oauth"
+	"ambar/api/uploads"
 )
 
 // pinger is what the health check needs from the database (the pgx pool, or a fake in tests).
@@ -25,9 +26,11 @@ type pinger interface {
 
 // api holds what the handlers need. Built once in main.
 type api struct {
-	logger         *slog.Logger
-	db             pinger
-	auth           *auth.Service
+	logger *slog.Logger
+	db     pinger
+	auth   *auth.Service
+	// uploads is nil when storage isn't configured (development only); its routes then answer 503.
+	uploads        *uploads.Service
 	providers      map[string]*oauth.Provider
 	appURL         string
 	allowedOrigins []string
@@ -72,6 +75,12 @@ func newRouter(a *api) http.Handler {
 
 			r.Get("/auth/identities", a.handleIdentities)
 			r.Delete("/auth/identities/{provider}", a.handleUnlinkIdentity)
+
+			// Each request may reserve and sign up to 20 uploads.
+			r.With(rateLimit(30, time.Minute)).Post("/uploads", a.handleCreateUploads)
+			r.Get("/uploads/{uploadId}", a.handleGetUpload)
+			r.Delete("/uploads/{uploadId}", a.handleCancelUpload)
+			r.Post("/uploads/{uploadId}:complete", a.handleCompleteUpload)
 		})
 	})
 
