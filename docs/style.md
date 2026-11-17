@@ -23,6 +23,8 @@ These rules apply to everything under `docs/`, to `AGENTS.md` and to description
 - Code, file paths, env vars, error codes and log fields in backticks: `apps/api/routes.go`, `DATABASE_URL`, `invalid-code`, `http.route`.
 - Product terms as the product uses them: OCR is **readings**, a saved item is a **moment**.
 - Link to the source of truth instead of copying it: the OpenAPI file for endpoints, `plans.ts` for limits, `platforms.ts` for platforms.
+- Alerts use GitHub's syntax, so they read the same on GitHub and in the docs viewer (`/dev/docs`): a quote starting with `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]` or `[!CAUTION]`. Use them sparingly, for what a reader must not miss; one per section at most.
+- Code blocks always name their language (` ```sh `, ` ```json `), so they are highlighted.
 
 ## Decisions (ADRs)
 

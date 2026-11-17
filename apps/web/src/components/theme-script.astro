@@ -1,0 +1,19 @@
+---
+// Applies the theme before first paint, so a page never flashes the wrong one: the preference ThemeMenu saves
+// ("ambar.theme", @ambar/ui/lib/theme) or, without one or without storage, the system's.
+---
+
+<meta name="color-scheme" content="light dark" />
+<script is:inline>
+  (() => {
+    let preference = null;
+
+    try {
+      preference = localStorage.getItem("ambar.theme");
+    } catch {}
+
+    const dark = preference === "dark" || (preference !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+    document.documentElement.classList.toggle("dark", dark);
+    document.documentElement.style.colorScheme = dark ? "dark" : "light";
+  })();
+</script>

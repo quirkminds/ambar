@@ -1,0 +1,19 @@
+---
+import { getCollection, render } from "astro:content";
+import DocsLayout from "../../components/docs-layout.astro";
+import { docTitle } from "../../lib/docs.ts";
+
+export const prerender = false;
+
+const docs = await getCollection("engineeringDocs");
+
+const overview = docs.find((doc) => doc.id === "readme");
+
+if (!overview) throw new Error("The project README is required to render the documentation overview.");
+
+const { Content, headings } = await render(overview);
+---
+
+<DocsLayout title={docTitle(overview)} docs={docs} activeId="readme" headings={headings}>
+  <Content />
+</DocsLayout>

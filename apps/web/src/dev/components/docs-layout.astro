@@ -1,0 +1,157 @@
+---
+import "@ambar/ui/globals.css";
+import { ThemeMenu } from "@ambar/ui/components/theme-menu";
+import ThemeScript from "../../components/theme-script.astro";
+import { DocsImageLightbox } from "./docs-image-lightbox.tsx";
+import type { EngineeringDoc } from "../lib/docs.ts";
+import { docHref, docNeighbours, docTitle, groupedDocs } from "../lib/docs.ts";
+
+type Props = {
+  title: string;
+  docs: EngineeringDoc[];
+  activeId: string;
+  headings?: { depth: number; slug: string; text: string }[];
+};
+
+const { title, docs, activeId, headings = [] } = Astro.props;
+
+const groups = groupedDocs(docs);
+
+const toc = headings.filter((heading) => heading.depth === 2 || heading.depth === 3);
+
+const { previous, next } = docNeighbours(docs, activeId);
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>{title} · Ambar docs</title>
+    <ThemeScript />
+  </head>
+  <body class="min-h-svh bg-background text-foreground antialiased">
+    <div class="min-h-svh">
+      <header class="sticky top-0 z-20 border-b bg-background/90 backdrop-blur-md">
+        <div class="mx-auto flex h-16 max-w-[100rem] items-center gap-6 px-gutter">
+          <a href="/dev/docs" class="shrink-0 font-heading text-xl font-bold tracking-tight">Ambar<span class="ml-2 font-sans text-xs font-medium tracking-[0.16em] text-muted-foreground uppercase">Docs</span></a>
+          <div class="hidden h-5 border-l sm:block"></div>
+          <a href="/dev" class="hidden text-sm text-muted-foreground hover:text-foreground sm:block">Developer tools</a>
+          <div class="ml-auto flex items-center gap-3">
+            <a href="/dev" class="hidden text-sm text-muted-foreground hover:text-foreground md:block">Design system</a>
+            <button type="button" data-docs-search-open class="flex min-w-40 items-center justify-between gap-5 rounded-lg border bg-card px-3 py-2 text-sm text-muted-foreground shadow-sm outline-hidden hover:border-foreground/30 focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring">
+              <span>Search docs</span><kbd class="rounded border bg-muted px-1.5 py-0.5 font-sans text-[10px]">⌘ K</kbd>
+            </button>
+            <ThemeMenu client:only="react" />
+          </div>
+        </div>
+      </header>
+
+      <div class="mx-auto grid max-w-[100rem] gap-10 px-gutter py-8 lg:grid-cols-[15rem_minmax(0,1fr)] xl:grid-cols-[15rem_minmax(0,1fr)_13rem]">
+        <aside class="min-w-0 lg:sticky lg:top-24 lg:max-h-[calc(100svh-7rem)] lg:self-start lg:overflow-y-auto">
+          <!-- Open by default (and without JavaScript); docs-enhance.ts folds it on narrow screens. -->
+          <details open data-docs-nav class="group/nav">
+            <summary class="flex cursor-pointer list-none items-center justify-between rounded-lg border bg-card px-3 py-2 text-sm font-medium outline-hidden focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring lg:hidden [&::-webkit-details-marker]:hidden">
+              Browse docs<span aria-hidden="true" class="text-muted-foreground transition-transform group-open/nav:rotate-180 motion-reduce:transition-none">▾</span>
+            </summary>
+            <nav aria-label="Documentation" class="mt-6 space-y-7 lg:mt-0">
+              <div>
+                <p class="mb-2 px-3 text-xs font-semibold tracking-wide text-muted-foreground uppercase">Getting started</p>
+                <a href="/dev/docs" aria-current={activeId === "readme" ? "page" : undefined} class="block rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground aria-[current=page]:bg-muted aria-[current=page]:font-medium aria-[current=page]:text-foreground">Overview</a>
+              </div>
+              {groups.map((group) => (
+                <div>
+                  <p class="mb-2 px-3 text-xs font-semibold tracking-wide text-muted-foreground uppercase">{group.label}</p>
+                  <ul class="space-y-0.5">
+                    {group.entries.map((doc) => (
+                      <li>
+                        <a href={docHref(doc)} aria-current={activeId === doc.id ? "page" : undefined} class="block rounded-lg px-3 py-2 text-sm leading-5 text-muted-foreground hover:bg-muted hover:text-foreground aria-[current=page]:bg-muted aria-[current=page]:font-medium aria-[current=page]:text-foreground">{docTitle(doc)}</a>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </nav>
+          </details>
+        </aside>
+
+        <main class="min-w-0 max-w-4xl">
+          <div class="mb-9 border-b pb-6">
+            <p class="mb-3 text-sm font-medium text-link">Engineering documentation</p>
+            <h1 class="font-heading text-4xl font-bold tracking-tight sm:text-5xl">{title}</h1>
+          </div>
+          <article
+            data-docs-content
+            class:list={[
+              "min-w-0 text-[0.96rem] leading-7 text-foreground/85",
+              "[&_a]:font-medium [&_a]:text-sky-deep [&_a]:underline [&_a]:decoration-sky-deep/40 [&_a]:underline-offset-4 [&_a:hover]:decoration-sky-deep dark:[&_a]:text-sky dark:[&_a]:decoration-sky/40 dark:[&_a:hover]:decoration-sky",
+              "[&_blockquote]:my-6 [&_blockquote]:border-l-2 [&_blockquote]:border-leaf [&_blockquote]:pl-5 [&_blockquote]:text-muted-foreground",
+              "[&_code]:rounded [&_code]:bg-muted [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em]",
+              // The page title is the layout's <h1>, taken from the doc's own; the doc's copy would repeat it.
+              "[&>h1:first-child]:hidden [&_h1]:mt-10 [&_h1]:mb-5 [&_h1]:font-heading [&_h1]:text-3xl [&_h1]:font-bold [&_h1]:tracking-tight",
+              "[&_h2]:mt-12 [&_h2]:mb-4 [&_h2]:scroll-mt-24 [&_h2]:border-b [&_h2]:pb-2 [&_h2]:font-heading [&_h2]:text-2xl [&_h2]:font-bold [&_h2]:tracking-tight",
+              "[&_h3]:mt-8 [&_h3]:mb-3 [&_h3]:scroll-mt-24 [&_h3]:font-heading [&_h3]:text-xl [&_h3]:font-bold",
+              "[&_li]:my-1 [&_ol]:my-5 [&_ol]:list-decimal [&_ol]:pl-6 [&_p]:my-5 [&_ul]:my-5 [&_ul]:list-disc [&_ul]:pl-6",
+              // Code blocks: Shiki emits both themes as variables (astro.config.ts); the page's theme picks one.
+              "[&_[data-code-block]]:my-6 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:rounded-xl [&_pre]:border [&_pre]:bg-muted [&_pre]:p-4 [&_pre]:leading-relaxed [&_pre_code]:bg-transparent [&_pre_code]:p-0",
+              "[&_.astro-code_span]:text-(color:--shiki-light) dark:[&_.astro-code_span]:text-(color:--shiki-dark)",
+              "[&_table]:my-6 [&_table]:w-full [&_table]:border-collapse [&_td]:border-b [&_td]:px-3 [&_td]:py-2 [&_th]:border-b [&_th]:px-3 [&_th]:py-2 [&_th]:text-left",
+            ]}
+          >
+            <slot />
+          </article>
+          <DocsImageLightbox client:load />
+          {(previous || next) && (
+            <nav aria-label="Previous and next" class="mt-16 grid gap-4 sm:grid-cols-2">
+              {previous && (
+                <a href={docHref(previous)} class="flex flex-col gap-1 rounded-xl border p-4 outline-hidden transition-colors hover:border-foreground/30 hover:bg-muted focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring motion-reduce:transition-none">
+                  <span class="text-xs text-muted-foreground">Previous</span>
+                  <span class="font-medium">{docTitle(previous)}</span>
+                </a>
+              )}
+              {next && (
+                <a href={docHref(next)} class="flex flex-col gap-1 rounded-xl border p-4 text-right outline-hidden transition-colors hover:border-foreground/30 hover:bg-muted focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring motion-reduce:transition-none sm:col-start-2">
+                  <span class="text-xs text-muted-foreground">Next</span>
+                  <span class="font-medium">{docTitle(next)}</span>
+                </a>
+              )}
+            </nav>
+          )}
+          <footer class="mt-10 border-t py-6 text-xs text-muted-foreground">
+            Internal project documentation · Available during local development
+          </footer>
+        </main>
+
+        <aside class="hidden xl:block">
+          {toc.length > 0 && (
+            <nav aria-label="On this page" class="sticky top-24">
+              <p class="mb-3 text-xs font-semibold tracking-wide text-muted-foreground uppercase">On this page</p>
+              <ul class="space-y-2 border-l pl-4 text-sm">
+                {toc.map((heading) => (
+                  <li class={heading.depth === 3 ? "pl-3" : undefined}>
+                    <a href={`#${heading.slug}`} class="text-muted-foreground hover:text-foreground">{heading.text}</a>
+                  </li>
+                ))}
+              </ul>
+            </nav>
+          )}
+        </aside>
+      </div>
+    </div>
+
+    <dialog data-docs-search-dialog aria-labelledby="docs-search-title" class="m-auto w-[min(42rem,calc(100%-2rem))] rounded-2xl border bg-card p-0 text-card-foreground shadow-2xl backdrop:bg-ink/40">
+      <div class="border-b p-4">
+        <h2 id="docs-search-title" class="sr-only">Search engineering documentation</h2>
+        <label for="docs-search-input" class="sr-only">Search engineering documentation</label>
+        <input id="docs-search-input" type="search" autocomplete="off" placeholder="Search documentation..." class="w-full bg-transparent text-lg outline-none placeholder:text-muted-foreground" />
+        <p class="mt-2 text-xs text-muted-foreground">Search titles and content · Press Escape to close</p>
+      </div>
+      <div data-docs-search-results class="max-h-[min(60svh,32rem)] overflow-y-auto p-2" aria-live="polite"></div>
+    </dialog>
+    <p data-docs-status role="status" class="sr-only"></p>
+    <script src="../lib/docs-search.ts"></script>
+    <script src="../lib/docs-enhance.ts"></script>
+  </body>
+</html>
