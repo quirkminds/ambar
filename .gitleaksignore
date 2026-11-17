@@ -1,0 +1,5 @@
+# Findings gitleaks reports that are not secrets, by fingerprint (commit:file:rule:line).
+# Only false positives belong here: a real secret is rotated first, then its fingerprint may be added.
+
+# The example nextPageToken in the listMoments response of openapi.yaml.
+7841bef1416f3baba8838a839546f22487ef281d:apps/api/openapi.yaml:generic-api-key:666
