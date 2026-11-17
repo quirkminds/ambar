@@ -13,6 +13,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Fails when anything that looks like a secret is in the history: every commit reachable from what is
+  # checked out (on a pull request, its merge with the base), not just the latest files. A known false
+  # positive goes in .gitleaksignore by fingerprint; a real secret is rotated first, never only ignored.
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      # sha256 of gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz, from the release's checksums.txt.
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # The binary, not gitleaks-action: the action needs a paid license on organization repositories.
+      - name: Install gitleaks
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$archive"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
+
+      # --redact: the logs of a public repository are public; a finding shows where, never the value.
+      - name: Scan for secrets
+        run: '"$RUNNER_TEMP/gitleaks" git --redact --no-banner --verbose .'
+
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 15

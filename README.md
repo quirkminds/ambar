@@ -27,7 +27,7 @@ Upcoming apps: `apps/extension`, `apps/desktop`, `apps/mobile`. Packages are fla
 - [Node.js](https://nodejs.org) 22 (22.12 or newer). Astro 7 requires it, and its CLI runs on Node even when started through Bun.
 - For `apps/api`: [Go](https://go.dev) 1.27 and Docker for the development Postgres.
 
-CI (`.github/workflows/ci.yml`) runs typecheck, lint, build and the tests (Go against Postgres) with these versions on every pull request and on pushes to `main`.
+CI (`.github/workflows/ci.yml`) runs typecheck, lint, build and the tests (Go against Postgres) with these versions on every pull request and on pushes to `main`, and scans the whole history for secrets with gitleaks (false positives go in `.gitleaksignore`).
 
 ## Docs
 
