@@ -1,4 +1,7 @@
-
+// Lab candidate: an image lightbox that opens from the image it shows, zooms toward the pointer (wheel, plus
+// and minus, double-click between fit and close-up) and pans (drag, arrow keys); Escape returns home, then
+// closes. Inspired by interior.dev's Lightbox (behavior and accessibility, not its code). Used by the docs
+// viewer (/dev/docs); moves to packages/ui once approved.
 import {
   useCallback,
   useEffect,
