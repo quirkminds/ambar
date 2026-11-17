@@ -2,7 +2,8 @@
 
 Use this page to turn on "Continue with Google" and "Continue with GitHub" for an environment. A provider is on when both its variables are set ([environment](../reference/environment.md)); the design is in decision [0005](../decisions/0005-sign-in-with-google-and-github.md).
 
-Redirect URIs must match exactly, including scheme, host and port:
+> [!IMPORTANT]
+> Redirect URIs must match exactly, including scheme, host and port:
 
 | Provider | Development | Production |
 | --- | --- | --- |
