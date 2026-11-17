@@ -24,8 +24,8 @@ The following diagram is a roadmap, not a deployment inventory. Its components a
 
 | Status | Components and behavior |
 | --- | --- |
-| Running today | Go API for health and authentication, PostgreSQL auth data, email delivery and configured Google/GitHub sign-in. |
-| Designed, not built | Direct client-to-R2 uploads, signed media URLs (previews served by the API behind Cloudflare's cache, originals presigned from R2), file processing, thumbnails, quotas, vault membership and media records. Upload operations in OpenAPI are design-only. |
+| Running today | Go API for health and authentication, PostgreSQL auth data, email delivery and configured Google/GitHub sign-in. Vaults and membership, quotas, direct client-to-R2 uploads and photo processing into moments (metadata stripped, WebP copies, duplicates within a vault). The clients don't use these yet. |
+| Designed, not built | Clip and PDF processing, reading moments, signed media URLs (previews served by the API behind Cloudflare's cache, originals presigned from R2) and permanent deletion. Moment operations in OpenAPI are design-only. |
 | Target or undecided | External queue, AI Gateway and providers, agent credentials/MCP, vector search, SSE, read replicas, load-balanced API instances and backup bucket. These are not current API capabilities. |
 
 The intended split is that Go makes authorization and persistence decisions, while Cloudflare handles large media transfers and edge delivery. Go may read and write R2 objects during background processing. Clients use signed URLs for direct upload and media delivery. The detailed flow and open failure cases are in [Media storage](media-storage.md).

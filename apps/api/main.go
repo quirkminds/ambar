@@ -21,6 +21,7 @@ import (
 	"ambar/api/mail"
 	"ambar/api/migrations"
 	"ambar/api/oauth"
+	"ambar/api/photos"
 	"ambar/api/storage"
 	"ambar/api/uploads"
 )
@@ -73,6 +74,11 @@ func run(ctx context.Context, getenv func(string) string) error {
 		return err
 	}
 
+	processing, err := photoTools(ctx, bucket != nil, production)
+	if err != nil {
+		return err
+	}
+
 	// The pool connects lazily: the API starts even if Postgres is down, and /healthz reports it.
 	db, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -93,6 +99,19 @@ func run(ctx context.Context, getenv func(string) string) error {
 	}
 
 	go cleanupLoop(ctx, authService, uploadService)
+
+	// Workers stop with ctx; run waits for them before closing the pool.
+	workersDone := make(chan struct{})
+	if uploadService != nil && processing {
+		go func() {
+			uploadService.Work(ctx, uploadWorkers)
+			close(workersDone)
+		}()
+	} else {
+		close(workersDone)
+	}
+
+	defer func() { <-workersDone }()
 
 	handler := newRouter(&api{
 		logger:         logger,
@@ -209,6 +228,29 @@ func cleanupLoop(ctx context.Context, service *auth.Service, uploadService *uplo
 		case <-ticker.C:
 		}
 	}
+}
+
+// uploadWorkers is how many photos are processed at once: each runs libvips on one core.
+const uploadWorkers = 2
+
+// photoTools checks libvips, which processing runs. Production refuses to start without it; development
+// warns and leaves uploads in "uploaded" (nothing processes them).
+func photoTools(ctx context.Context, storage, production bool) (bool, error) {
+	if !storage {
+		return false, nil
+	}
+
+	if err := photos.CheckTools(ctx); err != nil {
+		if production {
+			return false, fmt.Errorf("photo processing: %w (install libvips-tools)", err)
+		}
+
+		slog.WarnContext(ctx, "photo processing off: uploads stay uploaded", "err", err)
+
+		return false, nil
+	}
+
+	return true, nil
 }
 
 // mediaStorage connects to the R2 bucket when its four variables are set. Development may run without it

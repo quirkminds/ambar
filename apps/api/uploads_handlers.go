@@ -23,10 +23,13 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 
 // refusedCopy is the end-user sentence for each per-file refusal and failure.
 var refusedCopy = map[string]string{
-	uploads.UnsupportedType: "Ambar keeps photos, clips and PDFs.",
+	uploads.UnsupportedType: "For now Ambar keeps photos: JPEG, PNG, WebP or HEIC.",
 	uploads.FileTooLarge:    "This file is bigger than 100 MB.",
 	uploads.QuotaExceeded:   "There isn't enough room left in this library.",
 	uploads.Mismatch:        "The file changed while it was uploading. Try keeping it again.",
+	uploads.Unreadable:      "We couldn't read this file. Try another one.",
+	uploads.Revoked:         "You can no longer add to this library.",
+	uploads.Internal:        "Something went wrong on our side. Try keeping it again.",
 }
 
 type uploadJSON struct {
@@ -37,6 +40,7 @@ type uploadJSON struct {
 	ContentType string       `json:"contentType"`
 	CreatedAt   time.Time    `json:"createdAt"`
 	ExpiresAt   time.Time    `json:"expiresAt"`
+	MomentID    string       `json:"momentId,omitempty"`
 	Failure     *failureJSON `json:"failure,omitempty"`
 }
 
@@ -46,7 +50,7 @@ type failureJSON struct {
 }
 
 func uploadToJSON(u uploads.Upload) uploadJSON {
-	out := uploadJSON{ID: u.ID, Status: u.Status, Name: u.Name, Size: u.Size, ContentType: u.ContentType, CreatedAt: u.CreatedAt, ExpiresAt: u.ExpiresAt}
+	out := uploadJSON{ID: u.ID, Status: u.Status, Name: u.Name, Size: u.Size, ContentType: u.ContentType, CreatedAt: u.CreatedAt, ExpiresAt: u.ExpiresAt, MomentID: u.MomentID}
 
 	if u.FailureCode != "" {
 		out.Failure = &failureJSON{Code: u.FailureCode, Detail: refusedCopy[u.FailureCode]}
@@ -101,9 +105,16 @@ func (a *api) handleCreateUploads(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := make([]map[string]any, len(results))
-	accepted, reserved := 0, int64(0)
+	accepted, duplicates, reserved := 0, 0, int64(0)
 
 	for i, result := range results {
+		if result.Duplicate != "" {
+			duplicates++
+			out[i] = map[string]any{"status": "duplicate", "momentId": result.Duplicate}
+
+			continue
+		}
+
 		if result.Upload == nil {
 			refused := map[string]any{"status": "rejected", "code": result.Refused, "detail": refusedCopy[result.Refused]}
 
@@ -128,7 +139,7 @@ func (a *api) handleCreateUploads(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	slog.InfoContext(r.Context(), "uploads reserved", "event", "upload.reserved", "user_id", session.UserID, "accepted", accepted, "refused", len(results)-accepted, "bytes", reserved)
+	slog.InfoContext(r.Context(), "uploads reserved", "event", "upload.reserved", "user_id", session.UserID, "accepted", accepted, "duplicates", duplicates, "refused", len(results)-accepted-duplicates, "bytes", reserved)
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"results": out,

@@ -1,13 +1,15 @@
-// Package uploads takes files from clients to storage without their bytes passing through the API.
-// Create checks the vault role, each file and the quota, reserves the bytes and signs one PUT per file;
-// the client sends the file straight to the bucket and calls Complete, which checks what arrived. The
-// rules (limits, reservation, expiry) live here; HTTP lives in the handlers, SQL in store.go.
+// Package uploads takes files from clients to storage without their bytes passing through the API, and
+// turns them into moments. Create checks the vault role, each file and the quota, reserves the bytes and
+// signs one PUT per file; the client sends the file straight to the bucket and calls Complete, which
+// checks what arrived; workers then process it (process.go). The rules (limits, reservation, expiry)
+// live here; HTTP lives in the handlers, SQL in store.go.
 package uploads
 
 import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"io"
 	"math"
 	"slices"
 	"strings"
@@ -34,17 +36,15 @@ const (
 	// completeWithin: how long the client has to call Complete; past it the reservation is released.
 	// Longer than putTTL, so a file sent at the last moment can still be completed.
 	completeWithin = time.Hour
-	// keepFinished: expired and failed uploads stay readable this long, then cleanup deletes them.
+	// keepFinished: ready, expired and failed uploads stay readable this long, then cleanup deletes them.
 	keepFinished  = 24 * time.Hour
 	maxNameLength = 255
 )
 
-// contentTypes Ambar keeps: photos, clips and PDFs. Never SVG or HTML, which could run as a page.
-var contentTypes = []string{
-	"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif",
-	"video/mp4", "video/quicktime", "video/webm",
-	"application/pdf",
-}
+// contentTypes Ambar keeps today: photos, the ones processing can turn into moments. Clips and PDFs come
+// with their processing: accepting them before would hold their bytes with nothing to release them.
+// Never SVG or HTML, which could run as a page.
+var contentTypes = []string{"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 
 var (
 	// ErrInvalid: the request is malformed (a client bug, not a file Ambar refuses).
@@ -77,14 +77,22 @@ const (
 	UnsupportedType = "unsupported-type"
 	FileTooLarge    = "file-too-large"
 	QuotaExceeded   = "quota-exceeded"
-	// Mismatch: what arrived isn't what was declared (size or type).
+	// Mismatch: what arrived isn't what was declared (size, type, checksum).
 	Mismatch = "upload-mismatch"
+	// Unreadable: the bytes aren't a photo processing can read (corrupt, truncated, a bomb).
+	Unreadable = "unreadable-file"
+	// Revoked: whoever sent it can no longer add to the vault.
+	Revoked = "access-revoked"
+	// Internal: processing kept failing for reasons of ours (storage, tools); nothing was kept.
+	Internal = "internal"
 )
 
 // Storage is what uploads need from the bucket (storage.Client, or a fake in tests).
 type Storage interface {
 	PresignPut(ctx context.Context, key, contentType string, size int64, sha256Hex string, ttl time.Duration) (string, map[string]string, error)
 	Head(ctx context.Context, key string) (storage.Object, error)
+	Get(ctx context.Context, key string, max int64) (io.ReadCloser, error)
+	Put(ctx context.Context, key, contentType, path string) error
 	Delete(ctx context.Context, key string) error
 }
 
@@ -103,6 +111,8 @@ type File struct {
 
 type Upload struct {
 	ID          string
+	VaultID     string
+	UserID      string
 	Status      string
 	Name        string
 	Size        int64
@@ -113,6 +123,10 @@ type Upload struct {
 	ExpiresAt time.Time
 	// FailureCode is set when Status is Failed.
 	FailureCode string
+	// MomentID is set when Status is Ready: the moment it became (or the one it duplicated).
+	MomentID   string
+	CapturedAt *time.Time
+	Attempts   int
 }
 
 // Target is where the client sends the bytes.
@@ -122,10 +136,12 @@ type Target struct {
 	ExpiresAt time.Time
 }
 
-// Result is the outcome for one file: Accepted with Upload and Put, or Refused with a per-file code.
+// Result is the outcome for one file: Accepted with Upload and Put, Duplicate (the moment already kept in
+// the vault), or Refused with a per-file code.
 type Result struct {
-	Upload *Upload
-	Put    *Target
+	Upload    *Upload
+	Put       *Target
+	Duplicate string
 	// Refused, with MaxBytes (FileTooLarge) or BytesLeft (QuotaExceeded).
 	Refused   string
 	MaxBytes  int64
@@ -139,10 +155,12 @@ type Quota struct {
 type Service struct {
 	store   store
 	storage Storage
+	// wake tells a waiting worker there is an upload to process.
+	wake chan struct{}
 }
 
 func NewService(db *pgxpool.Pool, s Storage) *Service {
-	return &Service{store: store{db: db}, storage: s}
+	return &Service{store: store{db: db}, storage: s, wake: make(chan struct{}, 1)}
 }
 
 // Key is where an upload's bytes wait in the bucket until processing moves them.
@@ -162,7 +180,7 @@ func (s *Service) Create(ctx context.Context, userID, vaultID string, files []Fi
 		}
 	}
 
-	return s.store.reserve(ctx, userID, vaultID, completeWithin, func(quota *Quota, pending int, insert insertFunc) ([]Result, error) {
+	return s.store.reserve(ctx, userID, vaultID, completeWithin, func(quota *Quota, pending int, tx reservation) ([]Result, error) {
 		if pending+len(files) > maxPending {
 			return nil, ErrTooManyPending
 		}
@@ -170,33 +188,57 @@ func (s *Service) Create(ctx context.Context, userID, vaultID string, files []Fi
 		results := make([]Result, len(files))
 
 		for i, f := range files {
+			var err error
+
 			switch {
 			case !slices.Contains(contentTypes, f.ContentType):
 				results[i] = Result{Refused: UnsupportedType}
 			case f.Size > MaxFileBytes:
 				results[i] = Result{Refused: FileTooLarge, MaxBytes: MaxFileBytes}
-			case quota.Used+quota.Reserved+f.Size > quota.Limit:
-				results[i] = Result{Refused: QuotaExceeded, BytesLeft: max(quota.Limit-quota.Used-quota.Reserved, 0)}
 			default:
-				upload, err := insert(f)
-				if err != nil {
-					return nil, err
-				}
+				results[i], err = s.accept(ctx, quota, tx, f)
+			}
 
-				// Presigning is local (no request leaves), so it can happen inside the transaction: a slot
-				// is only reserved if it was also signed.
-				url, headers, err := s.storage.PresignPut(ctx, Key(upload.ID), f.ContentType, f.Size, f.SHA256, putTTL)
-				if err != nil {
-					return nil, err
-				}
-
-				quota.Reserved += f.Size
-				results[i] = Result{Upload: &upload, Put: &Target{URL: url, Headers: headers, ExpiresAt: upload.CreatedAt.Add(putTTL)}}
+			if err != nil {
+				return nil, err
 			}
 		}
 
 		return results, nil
 	})
+}
+
+// accept answers one file Ambar can keep: a duplicate of a kept moment (nothing to upload, nothing
+// reserved), refused for the quota, or reserved with its PUT signed.
+func (s *Service) accept(ctx context.Context, quota *Quota, tx reservation, f File) (Result, error) {
+	momentID, found, err := tx.duplicate(f.SHA256)
+	if err != nil {
+		return Result{}, err
+	}
+
+	if found {
+		return Result{Duplicate: momentID}, nil
+	}
+
+	if quota.Used+quota.Reserved+f.Size > quota.Limit {
+		return Result{Refused: QuotaExceeded, BytesLeft: max(quota.Limit-quota.Used-quota.Reserved, 0)}, nil
+	}
+
+	upload, err := tx.insert(f)
+	if err != nil {
+		return Result{}, err
+	}
+
+	// Presigning is local (no request leaves), so it can happen inside the transaction: a slot is only
+	// reserved if it was also signed.
+	url, headers, err := s.storage.PresignPut(ctx, Key(upload.ID), f.ContentType, f.Size, f.SHA256, putTTL)
+	if err != nil {
+		return Result{}, err
+	}
+
+	quota.Reserved += f.Size
+
+	return Result{Upload: &upload, Put: &Target{URL: url, Headers: headers, ExpiresAt: upload.CreatedAt.Add(putTTL)}}, nil
 }
 
 // wellFormed checks what a correct client always sends. Files Ambar refuses (type, size) are answered per
@@ -258,6 +300,15 @@ func (s *Service) Complete(ctx context.Context, userID, uploadID string) (Upload
 		return Upload{}, ErrExpired
 	}
 
+	// Someone removed from the vault (or made a viewer) since signing can't finish adding to it.
+	if allowed, err := s.store.canAdd(ctx, upload.UserID, upload.VaultID); err != nil {
+		return Upload{}, err
+	} else if !allowed {
+		_ = s.storage.Delete(ctx, Key(uploadID))
+
+		return s.store.finish(ctx, uploadID, Failed, Revoked)
+	}
+
 	object, err := s.storage.Head(ctx, Key(uploadID))
 	if errors.Is(err, storage.ErrNotFound) {
 		return Upload{}, ErrMissing
@@ -287,6 +338,8 @@ func (s *Service) Complete(ctx context.Context, userID, uploadID string) (Upload
 		return Upload{}, err
 	case finished.Status == Expired:
 		return Upload{}, ErrExpired
+	case finished.Status == Uploaded:
+		s.nudge()
 	}
 
 	return finished, nil

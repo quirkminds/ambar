@@ -82,6 +82,14 @@ Wrangler can't create R2 access keys; use the dashboard.
 
 The secret access key is shown once. Never paste it in chats, issues or logs. To rotate, create a new token, deploy it, then delete the old one.
 
+## Install libvips
+
+Processing runs libvips' command-line tools, with HEIC support:
+- **macOS (development):** `brew install vips` (includes libheif).
+- **The VPS:** `sudo apt install libvips-tools`.
+
+Check with `vips -l | grep -E "heifload|webpsave"`. Without them, the API in development warns `photo processing off` and uploads stay `uploaded`; in production it refuses to start. The photo tests skip without them.
+
 ## Production only
 
 These apply only once `media.ambar.page` and the API run behind Cloudflare:

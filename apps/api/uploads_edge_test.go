@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"ambar/api/auth"
+	"ambar/api/moments"
 	"ambar/api/storage"
 	"ambar/api/uploads"
 )
@@ -352,5 +353,89 @@ func TestUploadsAreRateLimited(t *testing.T) {
 	code, _, raw := u.create(p, `{"files":[`+fileJSON("a.jpg", 1)+`]}`)
 	if code != http.StatusTooManyRequests || !strings.Contains(raw, `"rate-limited"`) || !strings.Contains(raw, `"retryAfterMs"`) {
 		t.Fatalf("31st request: %d %s", code, raw)
+	}
+
+	// The limit is the account's: another network doesn't reset it.
+	elsewhere := p
+	elsewhere.ip = "198.51.100.71:1"
+
+	if code, _, raw := u.create(elsewhere, `{"files":[`+fileJSON("a.jpg", 1)+`]}`); code != http.StatusTooManyRequests {
+		t.Fatalf("same account, other IP: %d %s", code, raw)
+	}
+
+	// And it is only that account's: someone else on the same network still keeps.
+	other := u.signUp("192.0.2.72:1")
+	other.ip = p.ip
+
+	if code, _, raw := u.create(other, `{"files":[`+fileJSON("a.jpg", 1)+`]}`); code != http.StatusCreated {
+		t.Fatalf("other account, same IP: %d %s", code, raw)
+	}
+}
+
+// What processing leaves is served as the contract says: a ready upload names its moment, and asking to
+// keep the same file again answers duplicate. (Processing itself is tested in the uploads package.)
+func TestUploadsServeReadyAndDuplicate(t *testing.T) {
+	ctx := context.Background()
+	u := newUploadsHarness(t)
+	p := u.signUp("192.0.2.73:1")
+
+	_, created, raw := u.create(p, `{"files":[`+fileJSON("a.jpg", 2048)+`]}`)
+	if len(created.Results) != 1 || created.Results[0].Status != "accepted" {
+		t.Fatalf("create: %s", raw)
+	}
+
+	id := created.Results[0].Upload.ID
+
+	momentID, err := moments.NewID(ctx, u.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := moments.Create(ctx, u.pool, moments.Moment{ID: momentID, VaultID: p.vault, CreatedBy: p.id, Kind: "photo", Name: "a.jpg", ContentType: "image/jpeg", SHA256: sum},
+		[]moments.File{{Variant: "original", Key: moments.Key(p.vault, momentID, "original"), ContentType: "image/jpeg", Size: 2000}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := u.pool.Exec(ctx, `UPDATE uploads SET status = 'ready', moment_id = $2, completed_at = now() WHERE id = $1`, id, momentID); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := request(u.h, "GET", "/v1/uploads/"+id, p.ip, p.headers, "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"ready"`) || !strings.Contains(rec.Body.String(), `"momentId":"`+momentID+`"`) {
+		t.Fatalf("get: %d %s", rec.Code, rec.Body.String())
+	}
+
+	code, again, raw := u.create(p, `{"files":[`+fileJSON("copy.jpg", 2048)+`,{"name":"b.jpg","size":10,"contentType":"image/jpeg","sha256":"`+strings.Repeat("cd", 32)+`"}]}`)
+	if code != http.StatusCreated || again.Results[0].Status != "duplicate" || !strings.Contains(raw, `"momentId":"`+momentID+`"`) || again.Results[1].Status != "accepted" {
+		t.Fatalf("again: %d %s", code, raw)
+	}
+
+	// Used is the moment's original; only the new file is reserved.
+	if again.Quota.ReservedBytes != 10 || !strings.Contains(raw, `"usedBytes":2000`) {
+		t.Fatalf("quota: %s", raw)
+	}
+}
+
+// A failure is served with its code and a sentence for the person.
+func TestUploadsServeFailures(t *testing.T) {
+	ctx := context.Background()
+	u := newUploadsHarness(t)
+	p := u.signUp("192.0.2.74:1")
+
+	for _, code := range []string{uploads.Mismatch, uploads.Unreadable, uploads.Revoked, uploads.Internal} {
+		_, created, raw := u.create(p, `{"files":[`+fileJSON("a.jpg", 10)+`]}`)
+		if len(created.Results) != 1 {
+			t.Fatalf("create: %s", raw)
+		}
+
+		id := created.Results[0].Upload.ID
+		if _, err := u.pool.Exec(ctx, `UPDATE uploads SET status = 'failed', failure_code = $2, completed_at = now() WHERE id = $1`, id, code); err != nil {
+			t.Fatal(err)
+		}
+
+		rec := request(u.h, "GET", "/v1/uploads/"+id, p.ip, p.headers, "")
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"code":"`+code+`"`) || strings.Contains(rec.Body.String(), `"detail":""`) {
+			t.Fatalf("%s: %d %s", code, rec.Code, rec.Body.String())
+		}
 	}
 }

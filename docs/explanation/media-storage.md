@@ -2,7 +2,7 @@
 
 How photos, clips and PDFs are uploaded, processed, stored and shown, and why it is shaped this way. The decision is [0006](../decisions/0006-media-storage-on-r2.md); the endpoints are in [`openapi.yaml`](../../apps/api/openapi.yaml) under the `uploads` tag.
 
-Status: partly built. Vaults, membership and uploads up to `uploaded` (reserve, sign, `:complete`, cancel, cleanup) run in the API; processing, moments and serving are designed, not built, and the clients still use the mock upload and library. The [architecture diagram](../architecture/media-platform.svg) is a future target, not a deployment inventory.
+Status: partly built. Vaults, membership, uploads (reserve, sign, `:complete`, cancel, cleanup) and photo processing into moments run in the API; clips and PDFs, serving moments and previews, and permanent deletion are designed, not built, and the clients still use the mock upload and library. The [architecture diagram](../architecture/media-platform.svg) is a future target, not a deployment inventory.
 
 ## The split
 
@@ -35,7 +35,7 @@ Rule of thumb for future pieces: it goes to Cloudflare when it has to happen nea
 
    One bad file never blocks the others.
 3. The client `PUT`s each accepted file to R2 with the settable signed headers. The browser supplies `Content-Length`; client code must not try to set it manually.
-4. The client calls `POST /v1/uploads/{uploadId}:complete`. The API checks that the object exists with the declared size and queues the upload for processing. Calling it again is harmless.
+4. The client calls `POST /v1/uploads/{uploadId}:complete`. The API checks that the uploader can still add to the vault and that the object exists as declared, and queues the upload for processing. Calling it again is harmless.
 5. The client follows `GET /v1/uploads/{uploadId}` until it reads `ready` (with the moment) or `failed` (with a code).
 
 The reservation is what makes quota hold when 500 files arrive at once: every slot counts against the quota the moment it is signed, not when it finishes.
@@ -58,23 +58,33 @@ Files are capped at 100 MB and clips at 30 seconds (the client already enforces 
 
 ## Processing
 
-There is no queue yet. After `:complete`, the upload is `uploaded`, and workers inside the API process take it with `SELECT … FOR UPDATE SKIP LOCKED`. A restart picks up whatever was left. Processing is idempotent and keyed by upload id, so running it twice changes nothing.
+Built for photos (`apps/api/photos`, `apps/api/uploads/process.go`). There is no queue: after `:complete` the upload is `uploaded`, and two workers inside the API lease it from Postgres (`FOR UPDATE SKIP LOCKED`, `lease_until` five minutes ahead, `attempts` + 1). `:complete` wakes a worker; idle ones also look every 5 seconds. No transaction stays open while a photo is processed. If a worker dies, its lease runs out and another takes the upload again; only the lease holder can record a result.
 
 For each upload, processing does this:
-1. Reads `incoming/{uploadId}`, checks the type from its bytes and recomputes the SHA-256.
-2. Strips metadata **without re-encoding** the original:
-   - **JPEG:** drop the APP segments.
-   - **PNG and WebP:** drop the text and EXIF chunks.
-   - **Clips:** `ffmpeg -map_metadata -1 -c copy`, a remux with no re-encoding.
-   - **PDFs:** clear the document info (author, producer).
-   - Orientation is kept, so photos are never shown sideways.
-3. Writes the clean original to `vaults/{vaultId}/moments/{momentId}/original`.
-4. Makes the derived sizes with libvips, which re-encodes. That is fine for copies made only to be shown.
-   - Thumbnails come in 480 and 1200 px.
-   - HEIC also gets a display copy, because most browsers can't show HEIC.
-   - A clip gets a poster.
-   - A PDF gets its first page.
-5. Deletes `incoming/{uploadId}`, creates the moment and marks the upload `ready`.
+1. Downloads `incoming/{uploadId}` (never more than the declared size, plus one byte to tell), recomputing the SHA-256, and reads the real type from the first bytes. Any difference: `upload-mismatch`.
+2. Reads the dimensions without decoding the picture. Over 100 megapixels (a decompression bomb) or unreadable: `unreadable-file`.
+3. If the vault already keeps a moment with that fingerprint, skips to step 6 as a duplicate.
+4. Strips metadata **without re-encoding** the original (`photos.Strip`), at the byte level:
+   - **JPEG:** drops every APP segment but APP0 (JFIF), APP2 ICC profiles and APP14 (Adobe), plus comments, and anything after the end of the picture (motion photos, vendor trailers).
+   - **PNG:** drops `tEXt`, `zTXt`, `iTXt` and `tIME`, and anything after `IEND`.
+   - **WebP:** drops the `EXIF` and `XMP ` chunks and fixes the `VP8X` flags and RIFF size.
+   - **HEIC:** overwrites the Exif and XMP items in place with empty ones of the same length, so the box offsets stay valid. Only items stored in the file itself (`iloc` construction method 0) are supported; anything else is `unreadable-file` rather than kept with its metadata.
+   - Orientation is kept (JPEG, PNG and WebP as an EXIF block with that tag alone; HEIC in `irot`/`imir`), so photos are never shown sideways. ICC profiles are kept, so colors don't change.
+5. Makes the copies to be shown with `vipsthumbnail` (which re-encodes, fine for copies): WebP at 480 and 1200 px, turned the right way up, with no metadata; HEIC also gets a 2560 px `display` copy, because most browsers can't show HEIC. Then stores the clean original and the copies under `vaults/{vaultId}/moments/{momentId}/{variant}`.
+6. In one transaction, with the vault locked: checks again that the uploader can still add to the vault (otherwise `access-revoked`), checks again for a duplicate, creates the moment and its files (or points at the existing one) and marks the upload `ready` with `momentId`.
+7. Deletes `incoming/{uploadId}` and, for a duplicate or a failure, whatever it had written. Best effort; the lifecycle rule is the net.
+
+Failures that retrying can't change (`upload-mismatch`, `unreadable-file`, `access-revoked`) fail the upload at once. Others (storage down, a tool timing out) are retried when the lease runs out; after three attempts the upload fails with `internal`. Every failure releases the reservation.
+
+libvips runs as separate programs (`vips`, `vipsthumbnail`, `vipsheader`), never through a shell, with 60 seconds per call, `VIPS_BLOCK_UNTRUSTED=1` (only its audited loaders) and one thread each, so the API stays a static Go binary. Production refuses to start without them (or without HEIC support); development warns and leaves uploads `uploaded`.
+
+Clips (`ffmpeg -map_metadata -1 -c copy`, a remux, plus a poster) and PDFs (document info cleared, first page rendered) come later with their processing; until then `createUploads` answers them `unsupported-type`, so no bytes are held for something nothing can release.
+
+### Quota
+
+- **Used:** the size of the vault's clean originals, Trash included, until a moment is erased for good. The copies are Ambar's cost and don't count. A clean original is never larger than what was declared.
+- **Reserved:** uploads `pending` and still in time, `uploaded` or `processing`.
+- Becoming `ready` is one transaction under the vault lock, so the bytes move from reserved to used with no moment when they count twice or not at all.
 
 Readings (OCR) and AI descriptions are later, separate steps.
 
@@ -220,7 +230,8 @@ The current environment's command results and resource names are kept in ignored
 | Upload URL expires or browser CORS rejects the request | Keep the file locally and request a fresh slot when safe; do not mark it as stored | Test preflight and expired URLs from each app origin in supported browsers |
 | Client closes before completion | Expire the reservation and remove the incoming object later | Cleanup and the R2 lifecycle rule must be independently retryable |
 | Object size, type or fingerprint differs from the request | Reject processing, delete the incoming object and release the reservation | Re-read bytes server-side; test size enforcement before signing so a false size cannot bypass the upload limit or consume unbounded storage |
-| Processing stops after completion | Resume idempotently or transition to a visible failed state | Define retry limits, failure codes and how operators can inspect stuck uploads |
+| Processing stops after completion | The lease runs out and another worker takes it again; after three attempts it fails with `internal` and releases the reservation | Built and tested (`uploads/process_test.go`). Stuck uploads: `status = 'processing' AND lease_until < now()` |
+| A member is removed while their uploads are in flight | `:complete` and the final transaction check the role again: `access-revoked`, nothing kept | Built and tested |
 | Vault access is revoked after a media URL is issued | Previously issued URLs remain usable until they expire (previews 36 hours at most, originals 15 minutes) | Document the maximum exposure window; deletion should also attempt cache purge |
 | Cache purge fails after permanent deletion | A holder of an unexpired signed URL may still read the cached object | Alert on purge failures and rely only on the bounded URL expiry as fallback |
 | AI provider or policy cannot meet ZDR requirements | Do not send user content to that provider | Verify ZDR, region, training, subprocessors and logging before enabling a provider |

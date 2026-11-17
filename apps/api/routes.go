@@ -76,8 +76,9 @@ func newRouter(a *api) http.Handler {
 			r.Get("/auth/identities", a.handleIdentities)
 			r.Delete("/auth/identities/{provider}", a.handleUnlinkIdentity)
 
-			// Each request may reserve and sign up to 20 uploads.
-			r.With(rateLimit(30, time.Minute)).Post("/uploads", a.handleCreateUploads)
+			// Each request may reserve and sign up to 20 uploads. Counted per account, so changing networks
+			// doesn't reset it; the per-IP limit above still applies.
+			r.With(rateLimitPerUser(30, time.Minute)).Post("/uploads", a.handleCreateUploads)
 			r.Get("/uploads/{uploadId}", a.handleGetUpload)
 			r.Delete("/uploads/{uploadId}", a.handleCancelUpload)
 			r.Post("/uploads/{uploadId}:complete", a.handleCompleteUpload)
@@ -144,9 +145,19 @@ func problemTitle(code string) string {
 func rateLimit(requests int, window time.Duration) func(http.Handler) http.Handler {
 	return httprate.LimitBy(requests, window, func(r *http.Request) (string, error) {
 		return httprate.CanonicalizeIP(clientIP(r)), nil
-	}, httprate.WithLimitHandler(func(w http.ResponseWriter, r *http.Request) {
-		// httprate has already set Retry-After (seconds); repeat it in the body for clients.
-		seconds, _ := strconv.Atoi(w.Header().Get("Retry-After"))
-		writeProblemWith(w, r, http.StatusTooManyRequests, "rate-limited", "Too many attempts. Try again in a little while.", map[string]any{"retryAfterMs": seconds * 1000})
-	}))
+	}, rateLimited)
 }
+
+// rateLimitPerUser caps requests per signed-in account. Only inside the authenticated group.
+func rateLimitPerUser(requests int, window time.Duration) func(http.Handler) http.Handler {
+	return httprate.LimitBy(requests, window, func(r *http.Request) (string, error) {
+		return sessionFrom(r.Context()).UserID, nil
+	}, rateLimited)
+}
+
+// rateLimited answers every limit the same way: 429 rate-limited with retryAfterMs.
+var rateLimited = httprate.WithLimitHandler(func(w http.ResponseWriter, r *http.Request) {
+	// httprate has already set Retry-After (seconds); repeat it in the body for clients.
+	seconds, _ := strconv.Atoi(w.Header().Get("Retry-After"))
+	writeProblemWith(w, r, http.StatusTooManyRequests, "rate-limited", "Too many attempts. Try again in a little while.", map[string]any{"retryAfterMs": seconds * 1000})
+})

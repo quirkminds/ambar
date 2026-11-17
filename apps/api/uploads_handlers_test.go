@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,6 +26,7 @@ type memoryBucket struct {
 	mu      sync.Mutex
 	objects map[string]storage.Object
 	signed  map[string]string
+	data    map[string][]byte
 }
 
 func (b *memoryBucket) PresignPut(_ context.Context, key, contentType string, _ int64, sha256Hex string, _ time.Duration) (string, map[string]string, error) {
@@ -51,11 +54,43 @@ func (b *memoryBucket) Head(_ context.Context, key string) (storage.Object, erro
 	return object, nil
 }
 
+func (b *memoryBucket) Get(_ context.Context, key string, max int64) (io.ReadCloser, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	data, ok := b.data[key]
+	if !ok {
+		return nil, storage.ErrNotFound
+	}
+
+	return io.NopCloser(io.LimitReader(bytes.NewReader(data), max+1)), nil
+}
+
+func (b *memoryBucket) Put(_ context.Context, key, contentType, path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.data == nil {
+		b.data = map[string][]byte{}
+	}
+
+	b.data[key] = data
+	b.objects[key] = storage.Object{Size: int64(len(data)), ContentType: contentType}
+
+	return nil
+}
+
 func (b *memoryBucket) Delete(_ context.Context, key string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	delete(b.objects, key)
+	delete(b.data, key)
 
 	return nil
 }

@@ -5,10 +5,13 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -19,9 +22,12 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-// callBudget bounds each call to R2, the SDK's retries included (only HEAD and DELETE go out; both are
-// idempotent).
-const callBudget = 10 * time.Second
+// callBudget bounds each small call to R2 (HEAD, DELETE), the SDK's retries included; both are
+// idempotent. Moving a file (Get, Put) gets transferBudget: up to 100 MB from the VPS.
+const (
+	callBudget     = 10 * time.Second
+	transferBudget = 5 * time.Minute
+)
 
 var (
 	ErrNotFound    = errors.New("object not found")
@@ -129,6 +135,84 @@ func (c *Client) Head(ctx context.Context, key string) (Object, error) {
 	}
 
 	return object, nil
+}
+
+// Get streams an object. It never yields more than max bytes, plus one so the caller can tell the object
+// is larger than it should be.
+func (c *Client) Get(ctx context.Context, key string, max int64) (io.ReadCloser, error) {
+	ctx, cancel := context.WithTimeout(ctx, transferBudget)
+
+	out, err := c.s3.GetObject(ctx, &s3.GetObjectInput{Bucket: &c.bucket, Key: &key})
+	if err != nil {
+		cancel()
+
+		return nil, mapError(err)
+	}
+
+	return &body{Reader: io.LimitReader(out.Body, max+1), closer: out.Body, cancel: cancel}, nil
+}
+
+type body struct {
+	io.Reader
+	closer io.Closer
+	cancel context.CancelFunc
+}
+
+func (b *body) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		err = ErrUnavailable
+	}
+
+	return n, err
+}
+
+func (b *body) Close() error {
+	defer b.cancel()
+
+	return b.closer.Close()
+}
+
+// Put stores the file at path under key, with its SHA-256 checked by R2 on arrival.
+func (c *Client) Put(ctx context.Context, key, contentType, path string) error {
+	ctx, cancel := context.WithTimeout(ctx, transferBudget)
+	defer cancel()
+
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, f); err != nil {
+		return err
+	}
+
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+
+	checksum := base64.StdEncoding.EncodeToString(hash.Sum(nil))
+	size := info.Size()
+
+	if _, err := c.s3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:         &c.bucket,
+		Key:            &key,
+		Body:           f,
+		ContentLength:  &size,
+		ContentType:    &contentType,
+		ChecksumSHA256: &checksum,
+	}); err != nil {
+		return mapError(err)
+	}
+
+	return nil
 }
 
 // Delete removes an object. Deleting one that isn't there succeeds.

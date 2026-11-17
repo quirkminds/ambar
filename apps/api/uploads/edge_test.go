@@ -75,7 +75,7 @@ func TestCreateQuotaBoundaries(t *testing.T) {
 	t.Run("a file of exactly MaxFileBytes is accepted", func(t *testing.T) {
 		user := newUser(t, db)
 
-		results, _, err := s.Create(ctx, user, "", []File{file("a.mp4", MaxFileBytes, "video/mp4")})
+		results, _, err := s.Create(ctx, user, "", []File{file("a.heic", MaxFileBytes, "image/heic")})
 		if err != nil || results[0].Upload == nil {
 			t.Fatalf("%+v %v", results, err)
 		}
@@ -192,7 +192,6 @@ func TestCreateEdgeInput(t *testing.T) {
 		"255 emoji":               with(func(f *File) { f.Name = strings.Repeat("😀", 255) }),
 		"path-like name":          with(func(f *File) { f.Name = "../../etc/passwd%2F..\\x.jpg" }),
 		"width at int32 max":      with(func(f *File) { f.Width = limitOf(math.MaxInt32) }),
-		"clip at the limit":       with(func(f *File) { f.ContentType = "video/mp4"; f.DurationMs = limitOf(MaxClipMs) }),
 		"captured in year 1":      with(func(f *File) { f.CapturedAt = year(1) }),
 		"captured in year 9999":   with(func(f *File) { f.CapturedAt = year(9999) }),
 		"captured in a far zone":  with(func(f *File) { v := time.Date(2026, 1, 1, 0, 0, 0, 0, time.FixedZone("", 14*3600)); f.CapturedAt = &v }),
@@ -210,6 +209,13 @@ func TestCreateEdgeInput(t *testing.T) {
 		if got, _ := s.Get(ctx, user, results[0].Upload.ID); got.Name != f.Name {
 			t.Errorf("%s: name stored as %q", name, got.Name)
 		}
+	}
+
+	// A well-formed clip is answered per file: Ambar can't process clips yet (phase 2b), so it refuses them
+	// before any byte is sent rather than failing them once uploaded.
+	clip := with(func(f *File) { f.ContentType = "video/mp4"; f.DurationMs = limitOf(MaxClipMs) })
+	if results, _, err := s.Create(ctx, user, "", []File{clip}); err != nil || results[0].Refused != UnsupportedType {
+		t.Errorf("clip at the limit: %+v %v", results, err)
 	}
 
 	invalid := map[string]File{

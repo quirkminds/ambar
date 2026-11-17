@@ -1,12 +1,15 @@
 package uploads
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -31,6 +34,102 @@ type fakeStorage struct {
 	afterHead func()
 	headErr   error
 	deleteErr error
+	// data is the bytes behind objects, for processing; written is every key Put stored.
+	data    map[string][]byte
+	written []string
+	getErr  error
+	putErr  error
+	// beforePut runs on every Put, outside the lock.
+	beforePut func(key string)
+}
+
+func (f *fakeStorage) Get(_ context.Context, key string, max int64) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+
+	b, ok := f.data[key]
+	if !ok {
+		return nil, storage.ErrNotFound
+	}
+
+	return io.NopCloser(io.LimitReader(bytes.NewReader(b), max+1)), nil
+}
+
+func (f *fakeStorage) Put(_ context.Context, key, contentType, path string) error {
+	f.mu.Lock()
+	beforePut := f.beforePut
+	f.mu.Unlock()
+
+	if beforePut != nil {
+		beforePut(key)
+	}
+
+	f.mu.Lock()
+	putErr := f.putErr
+	f.mu.Unlock()
+
+	if putErr != nil {
+		return putErr
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	sum := sha256.Sum256(b)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.data == nil {
+		f.data = map[string][]byte{}
+	}
+
+	f.data[key] = b
+	f.written = append(f.written, key)
+
+	if f.objects == nil {
+		f.objects = map[string]storage.Object{}
+	}
+
+	f.objects[key] = storage.Object{Size: int64(len(b)), ContentType: contentType, SHA256: hex.EncodeToString(sum[:])}
+
+	return nil
+}
+
+// upload plays the client's PUT of real bytes, with the checksum that was signed.
+func (f *fakeStorage) upload(key, contentType string, b []byte) {
+	f.mu.Lock()
+
+	if f.data == nil {
+		f.data = map[string][]byte{}
+	}
+
+	f.data[key] = b
+	sum := f.signed[key]
+	f.mu.Unlock()
+
+	f.putObject(key, storage.Object{Size: int64(len(b)), ContentType: contentType, SHA256: sum})
+}
+
+// keys is every object in the bucket now.
+func (f *fakeStorage) keys() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	var keys []string
+	for k := range f.objects {
+		keys = append(keys, k)
+	}
+
+	slices.Sort(keys)
+
+	return keys
 }
 
 func (f *fakeStorage) PresignPut(_ context.Context, key, contentType string, _ int64, sha256Hex string, _ time.Duration) (string, map[string]string, error) {
@@ -76,6 +175,7 @@ func (f *fakeStorage) Delete(_ context.Context, key string) error {
 	}
 
 	delete(f.objects, key)
+	delete(f.data, key)
 	f.deleted = append(f.deleted, key)
 
 	return nil
@@ -181,9 +281,11 @@ func TestCreateAnswersEachFile(t *testing.T) {
 	results, quota, err := s.Create(ctx, user, "", []File{
 		file("a.jpg", 600, "image/jpeg"),
 		file("page.html", 10, "text/html"),
-		file("big.mp4", MaxFileBytes+1, "video/mp4"),
+		file("big.heic", MaxFileBytes+1, "image/heic"),
 		file("b.png", 500, "image/png"),
-		file("c.pdf", 400, "application/pdf"),
+		file("c.webp", 400, "image/webp"),
+		file("d.pdf", 10, "application/pdf"),
+		file("e.mov", 10, "video/quicktime"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -198,7 +300,7 @@ func TestCreateAnswersEachFile(t *testing.T) {
 	}
 
 	if results[2].Refused != FileTooLarge || results[2].MaxBytes != MaxFileBytes {
-		t.Fatalf("big.mp4: %+v", results[2])
+		t.Fatalf("big.heic: %+v", results[2])
 	}
 
 	// 600 reserved of 1000: 500 doesn't fit, 400 does.
@@ -207,7 +309,12 @@ func TestCreateAnswersEachFile(t *testing.T) {
 	}
 
 	if results[4].Upload == nil {
-		t.Fatalf("c.pdf: %+v", results[4])
+		t.Fatalf("c.webp: %+v", results[4])
+	}
+
+	// Not processed yet (phase 2b): refused before upload, never accepted and then failed.
+	if results[5].Refused != UnsupportedType || results[6].Refused != UnsupportedType {
+		t.Fatalf("pdf, mov: %+v %+v", results[5], results[6])
 	}
 
 	if quota.Limit != 1000 || quota.Reserved != 1000 || quota.Used != 0 {

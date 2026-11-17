@@ -1339,7 +1339,7 @@ components:
           $ref: "#/components/schemas/UploadTarget"
     UploadDuplicate:
       type: object
-      description: Already kept in this vault; nothing to upload. Not returned yet (it needs kept moments).
+      description: Already kept in this vault (outside the Trash); nothing to upload and nothing reserved.
       required: [status, momentId]
       properties:
         status:
@@ -1442,7 +1442,11 @@ components:
           examples: [0193a8c3-0a2b-7d4e-8f1a-3b5c7d9e1f20]
         failure:
           type: object
-          description: With `failed`, why. Nothing was kept and the reservation is released.
+          description: |
+            With `failed`, why. Nothing was kept and the reservation is released. `upload-mismatch`: the stored
+            bytes aren't the ones declared; `unreadable-file`: not a photo Ambar can read (corrupt, truncated, over
+            100 megapixels); `access-revoked`: the uploader can no longer add to the vault; `internal`: processing
+            kept failing on our side.
           required: [code, detail]
           examples:
             - code: unreadable-file
@@ -1450,7 +1454,7 @@ components:
           properties:
             code:
               type: string
-              enum: [upload-mismatch, unreadable-file, internal]
+              enum: [upload-mismatch, unreadable-file, access-revoked, internal]
             detail:
               type: string
     Quota:

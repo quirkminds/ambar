@@ -36,7 +36,16 @@ Every error response is an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) pr
 | `storage-unavailable` | 503 | Storage can't be reached, or isn't configured (development without `R2_*`). Also sets `Retry-After` |
 | `internal` | 500 | Unexpected server error. The log line with the same `requestId` has the cause |
 
-Per-file outcomes of `createUploads` are not problem documents: a rejected file carries `unsupported-type`, `file-too-large` (with `maxBytes`) or `quota-exceeded` (with `bytesLeft`) inside the `201` response, and the other files go on. A failed upload carries `upload-mismatch` in `failure` (`unreadable-file` and `internal` arrive with processing).
+Per-file outcomes of `createUploads` are not problem documents: a rejected file carries `unsupported-type`, `file-too-large` (with `maxBytes`) or `quota-exceeded` (with `bytesLeft`) inside the `201` response, and the other files go on. For now only photos (JPEG, PNG, WebP, HEIC) are accepted; clips and PDFs get `unsupported-type` until their processing exists. A file already kept in the vault answers `duplicate` with its `momentId` instead. A failed upload carries one of these in `failure`:
+
+| Code | Meaning |
+| --- | --- |
+| `upload-mismatch` | What reached storage isn't what was declared: size, type (read from the bytes) or SHA-256 |
+| `unreadable-file` | Not a photo Ambar can read: corrupt, truncated, or over 100 megapixels |
+| `access-revoked` | The uploader was removed from the vault, or made a viewer, before the moment was kept |
+| `internal` | Processing failed three times on our side (storage, tools). Nothing was kept |
+
+In every case nothing is kept and the reservation is released.
 
 ## Designed, not served yet
 
