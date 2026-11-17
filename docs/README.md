@@ -14,6 +14,7 @@ Sources of truth:
 
 - The API contract is [`apps/api/openapi.yaml`](../apps/api/openapi.yaml) (OpenAPI 3.1). `reference/api.md` only points at it; never describe an endpoint by hand elsewhere.
 - Errors are listed in [`reference/errors.md`](reference/errors.md), log fields in [`reference/logs.md`](reference/logs.md), environment variables in [`reference/environment.md`](reference/environment.md).
+- [`explanation/overview.md`](explanation/overview.md) separates the running system from the target media architecture; the linked diagram is a roadmap, not a deployment inventory.
 - Agent instructions live in [`AGENTS.md`](../AGENTS.md) at the root. It stays short and links here for depth.
 
 Personal, unpublished notes go in `docs/local/`, which Git ignores.

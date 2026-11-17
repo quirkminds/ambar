@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"mime"
 	"net/http"
@@ -244,16 +245,22 @@ func (a *api) sessionToken(r *http.Request) (token string, fromCookie bool) {
 // decodeJSON reads a small JSON body. Requiring application/json also means a cross-site form can't post
 // here: browsers must send a CORS preflight first, which other origins fail.
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	return decodeJSONUpTo(w, r, v, maxBodyBytes)
+}
+
+// decodeJSONUpTo is decodeJSON for the few bodies that are larger (an upload's file list).
+func decodeJSONUpTo(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
 	if mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mediaType != "application/json" {
 		writeProblem(w, r, http.StatusUnsupportedMediaType, "bad-request", "Send JSON.")
 
 		return false
 	}
 
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	decoder.DisallowUnknownFields()
 
-	if err := decoder.Decode(v); err != nil {
+	// One JSON value and nothing after it: a second one would be silently ignored.
+	if err := decoder.Decode(v); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		writeProblem(w, r, http.StatusBadRequest, "bad-request", "That request doesn't look right.")
 
 		return false

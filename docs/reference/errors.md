@@ -11,7 +11,7 @@ Every error response is an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) pr
 | `code` | yes | Stable identifier, see below. Clients switch on this |
 | `requestId` | yes | Same value as the `X-Request-Id` header |
 | `attemptsLeft` | `invalid-code` | Wrong codes the user can still try |
-| `retryAfterMs` | `rate-limited` | Milliseconds until the next email is allowed |
+| `retryAfterMs` | `rate-limited` | Milliseconds until the next attempt is allowed |
 
 ## Codes
 
@@ -25,9 +25,36 @@ Every error response is an [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) pr
 | `provider-unavailable` | 404 | The sign-in provider is unknown or not configured on this server |
 | `unauthorized` | 401 | No valid session cookie or token |
 | `forbidden` | 403 | Browser request from an origin that is not allowed |
-| `rate-limited` | 429 | Too many emails for this address (carries `retryAfterMs`) or too many requests from this client |
+| `rate-limited` | 429 | Too many emails for this address (carries `retryAfterMs`), too many uploads in progress in a vault (200), or too many requests from this client |
 | `network` | 503 | The sign-in email could not be sent. Also sets `Retry-After` |
+| `vault-not-found` | 404 | No vault with that id, or the caller isn't a member (the same answer on purpose) |
+| `vault-read-only` | 403 | The caller can view the vault but not add to it |
+| `upload-not-found` | 404 | No upload with that id for the caller |
+| `upload-missing` | 409 | `completeUpload` before the file reached storage |
+| `upload-not-pending` | 409 | `cancelUpload` on an upload already past `pending` |
+| `upload-expired` | 410 | The upload wasn't completed within an hour; its reservation is released |
+| `storage-unavailable` | 503 | Storage can't be reached, or isn't configured (development without `R2_*`). Also sets `Retry-After` |
 | `internal` | 500 | Unexpected server error. The log line with the same `requestId` has the cause |
+
+Per-file outcomes of `createUploads` are not problem documents: a rejected file carries `unsupported-type`, `file-too-large` (with `maxBytes`) or `quota-exceeded` (with `bytesLeft`) inside the `201` response, and the other files go on. For now only photos (JPEG, PNG, WebP, HEIC) are accepted; clips and PDFs get `unsupported-type` until their processing exists. A file already kept in the vault answers `duplicate` with its `momentId` instead. A failed upload carries one of these in `failure`:
+
+| Code | Meaning |
+| --- | --- |
+| `upload-mismatch` | What reached storage isn't what was declared: size, type (read from the bytes) or SHA-256 |
+| `unreadable-file` | Not a photo Ambar can read: corrupt, truncated, or over 100 megapixels |
+| `access-revoked` | The uploader was removed from the vault, or made a viewer, before the moment was kept |
+| `internal` | Processing failed three times on our side (storage, tools). Nothing was kept |
+
+In every case nothing is kept and the reservation is released.
+
+## Designed, not served yet
+
+The moments endpoints ([0006](../decisions/0006-media-storage-on-r2.md)) are in the contract but not implemented. Their codes move to the table above in the pull request that serves them.
+
+| `code` | Status | When |
+| --- | --- | --- |
+| `moment-not-found` | 404 | No moment with that id that the caller can see |
+| `invalid-signature` | 403 | A preview URL is expired, altered or signed with a retired key |
 
 ## Provider sign-in redirects
 

@@ -4,7 +4,8 @@ info:
   version: 1.0.0
   summary: Keep a moment and find it again on any device.
   description: |
-    The HTTP API behind Ambar's web, extension, desktop and mobile apps.
+    The HTTP API behind Ambar's web, extension, desktop and mobile apps. This contract includes live routes and explicitly
+    marked designs that are not served yet; see `docs/reference/api.md` for their status.
 
     Conventions:
 
@@ -13,7 +14,7 @@ info:
       The catalog is `docs/reference/errors.md`.
     - Every response carries `X-Request-Id`. Quote it when reporting a problem.
     - Routes under `/v1` are versioned by path and change only in compatible ways.
-    - Browser requests to `/v1` must come from an allowed `Origin` and are answered with `Cache-Control: no-store`.
+    - Cross-origin browser reads need an allowed `Origin` for CORS; state-changing requests with a disallowed `Origin` are rejected. `/v1` responses use `Cache-Control: no-store`.
   contact:
     name: Ambar
     url: https://ambar.page
@@ -35,6 +36,18 @@ tags:
       Asking never reveals whether an account exists; verifying returns `created` so the UI can greet accordingly.
       Browsers receive the session as an httpOnly cookie; native clients ask for the token and send it as a bearer.
       Browsers can also sign in with Google or GitHub (`startProviderSignIn`), onto the same accounts and sessions.
+  - name: uploads
+    description: |
+      Files go from the client straight to R2 (decision 0006, `docs/explanation/media-storage.md`): the API checks
+      and reserves, answers with one presigned `PUT` per file, and checks what arrived when the client calls
+      `completeUpload`. The bytes never pass through the API. Processing an uploaded file into a moment is not
+      served yet: uploads stop at `uploaded` for now.
+  - name: moments
+    description: |
+      Designed, not served yet (decision 0006, `docs/explanation/media-storage.md`).
+      What a vault keeps. Every moment carries preview URLs signed for the caller (24 hours, served from
+      `media.ambar.page`); the original is fetched on demand with `getMomentOriginal`. Clients keep moment ids,
+      never media URLs: a URL is only valid until its `expiresAt`, and reading the moment again gives a fresh one.
 paths:
   /healthz:
     get:
@@ -397,6 +410,434 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/Internal"
+  /v1/uploads:
+    post:
+      operationId: createUploads
+      tags: [uploads]
+      summary: Ask to upload files
+      description: |
+        Checks the vault role (`owner` or `editor`), each file's type and size and the quota, and answers one result
+        per file, in the order sent:
+        - `accepted`: the bytes are reserved; `PUT` the file to `put.url` with the settable headers in `put.headers` before `put.expiresAt`. The browser manages forbidden headers such as `Content-Length`.
+        - `duplicate`: the vault already has a moment with this fingerprint; nothing to upload.
+        - `rejected`: why this file can't be kept.
+
+        One rejected file never blocks the others. Reserved bytes count against the quota at once, so parallel batches
+        can't go over it.
+      requestBody:
+        description: The files to keep, up to 20, and optionally the vault.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadsRequest"
+            example:
+              files:
+                - name: IMG_2041.jpg
+                  size: 2483100
+                  contentType: image/jpeg
+                  sha256: 9f2c1e4b7a0d3c5e8f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70
+                  capturedAt: "2026-10-18T17:42:10Z"
+                  width: 4032
+                  height: 3024
+      responses:
+        "201":
+          description: One result per file, and the quota after the reservations.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Uploads"
+              example:
+                results:
+                  - status: accepted
+                    upload:
+                      id: 0193a8c2-5b1e-7c3d-9a4f-2e6b8d0c1f37
+                      status: pending
+                      name: IMG_2041.jpg
+                      size: 2483100
+                      contentType: image/jpeg
+                      createdAt: "2026-10-21T10:00:00Z"
+                      expiresAt: "2026-10-21T10:15:00Z"
+                    put:
+                      method: put
+                      url: https://ACCOUNT.eu.r2.cloudflarestorage.com/BUCKET/incoming/0193a8c2-5b1e-7c3d-9a4f-2e6b8d0c1f37?X-Amz-Signature=…
+                      headers:
+                        Content-Type: image/jpeg
+                        X-Amz-Checksum-Sha256: nywelK5Lq9D8XwChvk8sdrT/vBTyVZFiG9TsRX0NdwE=
+                      expiresAt: "2026-10-21T10:15:00Z"
+                quota:
+                  usedBytes: 812000000
+                  reservedBytes: 2483100
+                  limitBytes: 2147483648
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/VaultReadOnly"
+        "404":
+          $ref: "#/components/responses/VaultNotFound"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+  /v1/uploads/{uploadId}:
+    get:
+      operationId: getUpload
+      tags: [uploads]
+      summary: Follow an upload
+      description: |
+        Where the upload is: `pending` (waiting for the `PUT` and `completeUpload`), `uploaded` (queued),
+        `processing`, `ready` (with `momentId`), `failed` (with `failure`) or `expired` (never completed).
+      parameters:
+        - $ref: "#/components/parameters/UploadId"
+      responses:
+        "200":
+          description: The upload.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Upload"
+              example:
+                id: 0193a8c2-5b1e-7c3d-9a4f-2e6b8d0c1f37
+                status: ready
+                name: IMG_2041.jpg
+                size: 2483100
+                contentType: image/jpeg
+                createdAt: "2026-10-21T10:00:00Z"
+                expiresAt: "2026-10-21T10:15:00Z"
+                momentId: 0193a8c3-0a2b-7d4e-8f1a-3b5c7d9e1f20
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/UploadNotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+    delete:
+      operationId: cancelUpload
+      tags: [uploads]
+      summary: Cancel an upload
+      description: |
+        Gives up a `pending` upload and releases its reserved bytes. An upload past `pending` can't be cancelled;
+        the moment it becomes goes to the Trash like any other. Cancelling an expired upload also answers `204`.
+      parameters:
+        - $ref: "#/components/parameters/UploadId"
+      responses:
+        "204":
+          description: Cancelled.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/UploadNotFound"
+        "409":
+          $ref: "#/components/responses/UploadConflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+  /v1/uploads/{uploadId}:complete:
+    post:
+      operationId: completeUpload
+      tags: [uploads]
+      summary: Say the file is uploaded
+      description: |
+        Call it once the `PUT` succeeds. The API checks that the object exists with the declared size, type and checksum and
+        marks the upload `uploaded`; a file that doesn't match is deleted and the upload comes back `failed`
+        (`upload-mismatch`). Safe to repeat: an upload already past `pending` is returned as it is. Processing an
+        uploaded file into a moment (metadata stripped without re-encoding, sizes for display) is not served yet.
+      parameters:
+        - $ref: "#/components/parameters/UploadId"
+      responses:
+        "202":
+          description: Queued, or already further along. Follow it with `getUpload`.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Upload"
+              example:
+                id: 0193a8c2-5b1e-7c3d-9a4f-2e6b8d0c1f37
+                status: uploaded
+                name: IMG_2041.jpg
+                size: 2483100
+                contentType: image/jpeg
+                createdAt: "2026-10-21T10:00:00Z"
+                expiresAt: "2026-10-21T10:15:00Z"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/UploadNotFound"
+        "409":
+          $ref: "#/components/responses/UploadConflict"
+        "410":
+          $ref: "#/components/responses/UploadExpired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/Internal"
+        "503":
+          $ref: "#/components/responses/StorageUnavailable"
+  /v1/moments:
+    get:
+      operationId: listMoments
+      tags: [moments]
+      summary: List moments
+      description: |
+        Designed, not served yet.
+
+        The moments of one vault the caller is a member of, newest first. Without `filter`, the kept ones; with
+        `filter=deleted = true`, the Trash, most recently deleted first. Clients page through everything
+        (search and Canvas work on the whole library); `nextPageToken` is absent on the last page.
+      parameters:
+        - $ref: "#/components/parameters/VaultIdQuery"
+        - name: pageSize
+          in: query
+          description: Moments per page.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 200
+        - name: pageToken
+          in: query
+          description: "`nextPageToken` from the previous page. Opaque; only valid with the same `vaultId` and `filter`."
+          schema:
+            type: string
+        - name: filter
+          in: query
+          description: "AIP-160 filter. Only `deleted = true` (the Trash) is supported."
+          schema:
+            type: string
+            enum: ["deleted = true"]
+      responses:
+        "200":
+          description: One page of moments.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MomentPage"
+              example:
+                moments:
+                  - id: 0193a8c3-0a2b-7d4e-8f1a-3b5c7d9e1f20
+                    vaultId: 0193a8b0-1c2d-4e5f-8a9b-0c1d2e3f4a5b
+                    kind: photo
+                    createdAt: "2026-10-21T10:00:04Z"
+                    capturedAt: "2026-10-18T17:42:10Z"
+                    title: Sunset over the harbour
+                    topics: [sea, sunset]
+                    collectionIds: []
+                    onCanvas: false
+                    width: 4032
+                    height: 3024
+                    preview:
+                      smallUrl: https://media.ambar.page/previews/0193a8b0-1c2d-4e5f-8a9b-0c1d2e3f4a5b/0193a8c3-0a2b-7d4e-8f1a-3b5c7d9e1f20/small?exp=1792656000&kid=1&sig=…
+                      largeUrl: https://media.ambar.page/previews/0193a8b0-1c2d-4e5f-8a9b-0c1d2e3f4a5b/0193a8c3-0a2b-7d4e-8f1a-3b5c7d9e1f20/large?exp=1792656000&kid=1&sig=…
+                      width: 1200
+                      height: 900
+                      expiresAt: "2026-10-22T12:00:00Z"
+                nextPageToken: CiQwMTkzYThjMy0wYTJi
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/VaultNotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/Internal"
+  /v1/moments/{momentId}:
+    get:
+      operationId: getMoment
+      tags: [moments]
+      summary: Get a moment
+      description: |
+        Designed, not served yet.
+
+        One moment, kept or in the Trash, with fresh preview URLs. Used by the viewer (`?m=`) and to renew URLs that expired.
+      parameters:
+        - $ref: "#/components/parameters/MomentId"
+      responses:
+        "200":
+          description: The moment.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Moment"
+              example:
+                id: 0193a8c3-0a2b-7d4e-8f1a-3b5c7d9e1f20
+                vaultId: 0193a8b0-1c2d-4e5f-8a9b-0c1d2e3f4a5b
+                kind: link
+                createdAt: "2026-10-21T10:00:04Z"
+                title: How R2 pricing works
+                source: cloudflare.com
+                topics: [storage]
+                collectionIds: []
+                onCanvas: false
+                url: https://developers.cloudflare.com/r2/pricing/
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/MomentNotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/Internal"
+  /v1/moments/{momentId}/original:
+    get:
+      operationId: getMomentOriginal
+      tags: [moments]
+      summary: Open the original file
+      description: |
+        Designed, not served yet.
+
+        Checks that the caller can see the moment and redirects to the original file in storage through a presigned
+        URL valid for 15 minutes, so the bytes never pass through the API. Works as the `src` of a `<video>` or as a link.
+        Photos, clips and PDFs only; a link's original is its `url`.
+      parameters:
+        - $ref: "#/components/parameters/MomentId"
+        - name: download
+          in: query
+          description: "`true` asks storage to send the file as a download, under its original name."
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "302":
+          description: The presigned storage URL. Never cache or log it.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            Location:
+              $ref: "#/components/headers/Location"
+            Cache-Control:
+              description: Always `no-store`.
+              schema:
+                type: string
+                examples: [no-store]
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/MomentNotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/Internal"
+  /previews/{vaultId}/{momentId}/{variant}:
+    servers:
+      - url: https://media.ambar.page
+        description: Production media host (the same API binary, behind Cloudflare's cache)
+      - url: http://localhost:8080
+        description: Local development, the same server as the API
+    get:
+      operationId: getPreview
+      tags: [moments]
+      summary: A preview image
+      description: |
+        Designed, not served yet.
+
+        Never built by clients: the URL comes signed inside a moment (`preview.smallUrl`, `preview.largeUrl`). The
+        signature is the authorization, so this route needs no session and is public in `TestPrivateByDefault`.
+        The API checks `sig` (HMAC-SHA256 over the path and `exp` with the key `kid`) and `exp`, then streams the
+        image from storage. The response may be cached by Cloudflare under the full URL, never longer than `exp`.
+      security: []
+      parameters:
+        - name: vaultId
+          in: path
+          required: true
+          description: The vault the moment belongs to.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/MomentId"
+        - name: variant
+          in: path
+          required: true
+          description: "`small` (480 px on the long side) or `large` (1200 px)."
+          schema:
+            type: string
+            enum: [small, large]
+        - name: exp
+          in: query
+          required: true
+          description: Unix seconds when the URL expires; always on a window boundary, so the URL stays identical within it.
+          schema:
+            type: integer
+        - name: kid
+          in: query
+          required: true
+          description: Which signing key produced `sig`, so keys rotate without breaking URLs already issued.
+          schema:
+            type: string
+        - name: sig
+          in: query
+          required: true
+          description: base64url HMAC-SHA256 of the path and `exp`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The image.
+          headers:
+            Cache-Control:
+              description: "`public, max-age` and `s-maxage` set to the seconds left until `exp`."
+              schema:
+                type: string
+                examples: ["public, max-age=86400, s-maxage=86400"]
+            Cache-Tag:
+              description: "`m-<momentId>`, so erasing the moment purges every cached copy."
+              schema:
+                type: string
+                examples: [m-0193a8c3-0a2b-7d4e-8f1a-3b5c7d9e1f20]
+            X-Content-Type-Options:
+              description: Always `nosniff`.
+              schema:
+                type: string
+                examples: [nosniff]
+            Content-Security-Policy:
+              description: "Always `sandbox; default-src 'none'`."
+              schema:
+                type: string
+                examples: ["sandbox; default-src 'none'"]
+          content:
+            image/webp:
+              schema:
+                type: string
+                contentEncoding: binary
+        "403":
+          $ref: "#/components/responses/InvalidSignature"
+        "404":
+          $ref: "#/components/responses/MomentNotFound"
 security:
   - sessionCookie: []
   - bearerToken: []
@@ -420,6 +861,26 @@ components:
       schema:
         type: string
         enum: [google, github]
+    MomentId:
+      name: momentId
+      in: path
+      required: true
+      description: The `id` of a moment.
+      schema:
+        type: string
+    VaultIdQuery:
+      name: vaultId
+      in: query
+      description: The vault to read. Omitted, the caller's own vault.
+      schema:
+        type: string
+    UploadId:
+      name: uploadId
+      in: path
+      required: true
+      description: The `id` of an upload returned by `createUploads`.
+      schema:
+        type: string
   headers:
     Location:
       description: Where the browser goes next.
@@ -587,6 +1048,433 @@ components:
           items:
             type: string
             enum: [google, github]
+    MomentPage:
+      type: object
+      description: One page of `listMoments`.
+      required: [moments]
+      properties:
+        moments:
+          type: array
+          items:
+            $ref: "#/components/schemas/Moment"
+          examples:
+            - []
+        nextPageToken:
+          type: string
+          description: Pass it as `pageToken` for the next page. Absent on the last one.
+          examples: [CiQwMTkzYThjMy0wYTJi]
+    Moment:
+      type: object
+      description: |
+        Something kept. Members after `preview` depend on `kind`: `photo` has `width` and `height`; `clip` has
+        `durationMs` (and `width`, `height`); `link` has `url`, `description` and `embed`; `file` (PDF) has `name`,
+        `contentType`, `size` and `pages`. New members may be added; clients ignore the ones they don't know.
+      required: [id, vaultId, kind, createdAt, topics, collectionIds, onCanvas]
+      properties:
+        id:
+          type: string
+          examples: [0193a8c3-0a2b-7d4e-8f1a-3b5c7d9e1f20]
+        vaultId:
+          type: string
+          examples: [0193a8b0-1c2d-4e5f-8a9b-0c1d2e3f4a5b]
+        kind:
+          type: string
+          enum: [photo, clip, link, file]
+          examples: [photo]
+        createdAt:
+          type: string
+          format: date-time
+          description: When it was kept.
+          examples: ["2026-10-21T10:00:04Z"]
+        capturedAt:
+          type: string
+          format: date-time
+          description: When the photo or clip was taken, as the uploading client declared it.
+          examples: ["2026-10-18T17:42:10Z"]
+        title:
+          type: string
+          examples: [Sunset over the harbour]
+        source:
+          type: string
+          description: A domain or an app it came from.
+          examples: [instagram.com]
+        note:
+          type: string
+          examples: [For the poster]
+        topics:
+          type: array
+          items:
+            type: string
+          examples:
+            - [sea, sunset]
+        readings:
+          type: string
+          description: Words Ambar read in the image or document.
+          examples: [OPEN 9-17]
+        collectionIds:
+          type: array
+          items:
+            type: string
+          examples:
+            - []
+        onCanvas:
+          type: boolean
+          examples: [false]
+        deletedAt:
+          type: string
+          format: date-time
+          description: When it was moved to the Trash. Erased for good 30 days later.
+          examples: ["2026-10-21T11:00:00Z"]
+        keptBy:
+          type: object
+          description: Who kept it, in a vault with several members.
+          required: [name]
+          properties:
+            name:
+              type: string
+            avatarUrl:
+              type: string
+              format: uri
+          examples:
+            - name: Ana
+        preview:
+          $ref: "#/components/schemas/Preview"
+        width:
+          type: integer
+          minimum: 1
+          examples: [4032]
+        height:
+          type: integer
+          minimum: 1
+          examples: [3024]
+        durationMs:
+          type: integer
+          minimum: 1
+          maximum: 30000
+          examples: [12500]
+        url:
+          type: string
+          format: uri
+          description: Links only.
+          examples: ["https://developers.cloudflare.com/r2/pricing/"]
+        description:
+          type: string
+          description: Links only, the page's subtitle.
+          examples: [Pricing for R2 storage and operations.]
+        embed:
+          type: object
+          description: Links only. Absent when the site can't be shown inside Ambar.
+          required: [kind, url]
+          properties:
+            kind:
+              type: string
+              enum: [page, player]
+            url:
+              type: string
+              format: uri
+          examples:
+            - kind: player
+              url: https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ
+        name:
+          type: string
+          description: Files only, the original file name.
+          examples: [lease.pdf]
+        contentType:
+          type: string
+          description: Files only.
+          examples: [application/pdf]
+        size:
+          type: integer
+          description: Files only, bytes.
+          examples: [482113]
+        pages:
+          type: integer
+          minimum: 1
+          description: Files only, the PDF's page count.
+          examples: [4]
+    Preview:
+      type: object
+      description: |
+        Images that show the moment: the photo itself, a clip's poster, a PDF's first page or a link's capture.
+        Absent while processing or when there is none. Signed for the caller until `expiresAt`.
+      required: [smallUrl, largeUrl, width, height, expiresAt]
+      properties:
+        smallUrl:
+          type: string
+          format: uri
+          description: 480 px on the long side, for cards and lists.
+          examples: ["https://media.ambar.page/previews/0193a8b0-1c2d-4e5f-8a9b-0c1d2e3f4a5b/0193a8c3-0a2b-7d4e-8f1a-3b5c7d9e1f20/small?exp=1792656000&kid=1&sig=…"]
+        largeUrl:
+          type: string
+          format: uri
+          description: 1200 px on the long side, for the viewer and the preview panel.
+          examples: ["https://media.ambar.page/previews/0193a8b0-1c2d-4e5f-8a9b-0c1d2e3f4a5b/0193a8c3-0a2b-7d4e-8f1a-3b5c7d9e1f20/large?exp=1792656000&kid=1&sig=…"]
+        width:
+          type: integer
+          description: Width of the large image, to reserve space before it loads.
+          examples: [1200]
+        height:
+          type: integer
+          examples: [900]
+        expiresAt:
+          type: string
+          format: date-time
+          description: When both URLs stop working. Read the moment again for new ones.
+          examples: ["2026-10-22T12:00:00Z"]
+    UploadsRequest:
+      type: object
+      description: Files to keep in one vault.
+      required: [files]
+      additionalProperties: false
+      properties:
+        vaultId:
+          type: string
+          description: The vault to keep the files in. Omitted, the caller's own vault.
+          examples: [0193a8b0-1c2d-4e5f-8a9b-0c1d2e3f4a5b]
+        files:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/UploadFile"
+          examples:
+            - - name: IMG_2041.jpg
+                size: 2483100
+                contentType: image/jpeg
+                sha256: 9f2c1e4b7a0d3c5e8f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70
+    UploadFile:
+      type: object
+      description: |
+        One file to keep. `name`, `size`, `contentType` and `sha256` describe the bytes the client will upload, after
+        it stripped their metadata. `capturedAt`, `width`, `height` and `durationMs` are what it read before stripping;
+        the server keeps them as declared values.
+      required: [name, size, contentType, sha256]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: |
+            The original file name. Kept in the database, never in a storage key. No control characters (NUL, newlines,
+            escapes) or bidirectional overrides, and not only spaces: such a name is a `bad-request`.
+          examples: [IMG_2041.jpg]
+        size:
+          type: integer
+          minimum: 1
+          description: Bytes. Over 100 MB, the file is rejected with `file-too-large` (the others go on).
+          examples: [2483100]
+        contentType:
+          type: string
+          description: |
+            Kept: `image/jpeg`, `image/png`, `image/webp`, `image/heic`, `image/heif`, `video/mp4`,
+            `video/quicktime`, `video/webm`, `application/pdf`. Anything else is rejected with `unsupported-type`.
+          examples: [image/jpeg]
+        sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: |
+            SHA-256 of the bytes to upload, lowercase hex. Signed into the `PUT`, so storage refuses any other bytes, and
+            checked again by `completeUpload`. Compared only within the vault.
+          examples: [9f2c1e4b7a0d3c5e8f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f70]
+        capturedAt:
+          type: string
+          format: date-time
+          examples: ["2026-10-18T17:42:10Z"]
+        width:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+          examples: [4032]
+        height:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+          examples: [3024]
+        durationMs:
+          type: integer
+          minimum: 1
+          maximum: 30000
+          description: Clips only, at most 30 seconds.
+          examples: [12500]
+    Uploads:
+      type: object
+      description: What `createUploads` decided for each file.
+      required: [results, quota]
+      properties:
+        results:
+          type: array
+          description: One per file, in the order sent.
+          examples:
+            - - status: duplicate
+                momentId: 0193a8c3-0a2b-7d4e-8f1a-3b5c7d9e1f20
+          items:
+            $ref: "#/components/schemas/UploadResult"
+        quota:
+          $ref: "#/components/schemas/Quota"
+    UploadResult:
+      description: One file's outcome, told apart by `status`.
+      oneOf:
+        - $ref: "#/components/schemas/UploadAccepted"
+        - $ref: "#/components/schemas/UploadDuplicate"
+        - $ref: "#/components/schemas/UploadRejected"
+      discriminator:
+        propertyName: status
+        mapping:
+          accepted: "#/components/schemas/UploadAccepted"
+          duplicate: "#/components/schemas/UploadDuplicate"
+          rejected: "#/components/schemas/UploadRejected"
+    UploadAccepted:
+      type: object
+      description: The bytes are reserved; upload the file to `put`, then call `completeUpload`.
+      required: [status, upload, put]
+      properties:
+        status:
+          type: string
+          const: accepted
+          examples: [accepted]
+        upload:
+          $ref: "#/components/schemas/Upload"
+        put:
+          $ref: "#/components/schemas/UploadTarget"
+    UploadDuplicate:
+      type: object
+      description: Already kept in this vault (outside the Trash); nothing to upload and nothing reserved.
+      required: [status, momentId]
+      properties:
+        status:
+          type: string
+          const: duplicate
+          examples: [duplicate]
+        momentId:
+          type: string
+          description: The moment in this vault with the same fingerprint.
+          examples: [0193a8c3-0a2b-7d4e-8f1a-3b5c7d9e1f20]
+    UploadRejected:
+      type: object
+      description: This file can't be kept; the others are unaffected.
+      required: [status, code, detail]
+      properties:
+        status:
+          type: string
+          const: rejected
+          examples: [rejected]
+        code:
+          type: string
+          enum: [unsupported-type, file-too-large, quota-exceeded]
+          examples: [file-too-large]
+        detail:
+          type: string
+          description: A sentence for the end user.
+          examples: [This file is bigger than 100 MB.]
+        maxBytes:
+          type: integer
+          description: With `file-too-large`, the largest size allowed.
+          examples: [104857600]
+        bytesLeft:
+          type: integer
+          minimum: 0
+          description: With `quota-exceeded`, what is left in the plan.
+          examples: [1200000]
+    UploadTarget:
+      type: object
+      description: |
+        Where to send the bytes. `method` is `put` today (one request); `multipart` can be added for larger files.
+        Send exactly `headers` (today `Content-Type` and `X-Amz-Checksum-Sha256`, the declared `sha256` in base64) and
+        no others. `Content-Length` is signed too, but the browser sets it from the body; never set it from JavaScript.
+        Storage refuses a body of another size, type or checksum, so the URL can't replace the file once it is up. The
+        API checks the stored object again in `completeUpload`: an extra header storage kept (such as
+        `Content-Encoding`) fails the upload with `upload-mismatch`. A refused or expired `PUT` has no readable error in a browser
+        (no CORS headers on storage errors): ask for a new slot with `createUploads`.
+      required: [method, url, headers, expiresAt]
+      properties:
+        method:
+          type: string
+          enum: [put]
+          examples: [put]
+        url:
+          type: string
+          format: uri
+          description: Presigned for one key. Never log it.
+          examples: ["https://ACCOUNT.eu.r2.cloudflarestorage.com/BUCKET/incoming/0193a8c2-5b1e-7c3d-9a4f-2e6b8d0c1f37"]
+        headers:
+          type: object
+          description: Client-settable signed headers. Do not include browser-managed headers such as `Content-Length` here.
+          additionalProperties:
+            type: string
+        expiresAt:
+          type: string
+          format: date-time
+          examples: ["2026-10-21T10:15:00Z"]
+    Upload:
+      type: object
+      description: One file on its way to becoming a moment.
+      required: [id, status, name, size, contentType, createdAt, expiresAt]
+      properties:
+        id:
+          type: string
+          examples: [0193a8c2-5b1e-7c3d-9a4f-2e6b8d0c1f37]
+        status:
+          type: string
+          enum: [pending, uploaded, processing, ready, failed, expired]
+          examples: [processing]
+        name:
+          type: string
+          examples: [IMG_2041.jpg]
+        size:
+          type: integer
+          examples: [2483100]
+        contentType:
+          type: string
+          examples: [image/jpeg]
+        createdAt:
+          type: string
+          format: date-time
+          examples: ["2026-10-21T10:00:00Z"]
+        expiresAt:
+          type: string
+          format: date-time
+          description: When a `pending` upload expires and its reservation is released.
+          examples: ["2026-10-21T10:15:00Z"]
+        momentId:
+          type: string
+          description: With `ready`, the moment the file became.
+          examples: [0193a8c3-0a2b-7d4e-8f1a-3b5c7d9e1f20]
+        failure:
+          type: object
+          description: |
+            With `failed`, why. Nothing was kept and the reservation is released. `upload-mismatch`: the stored
+            bytes aren't the ones declared; `unreadable-file`: not a photo Ambar can read (corrupt, truncated, over
+            100 megapixels); `access-revoked`: the uploader can no longer add to the vault; `internal`: processing
+            kept failing on our side.
+          required: [code, detail]
+          examples:
+            - code: unreadable-file
+              detail: We couldn't read this file. Try another one.
+          properties:
+            code:
+              type: string
+              enum: [upload-mismatch, unreadable-file, access-revoked, internal]
+            detail:
+              type: string
+    Quota:
+      type: object
+      description: Storage of the vault's plan, in bytes.
+      required: [usedBytes, reservedBytes, limitBytes]
+      properties:
+        usedBytes:
+          type: integer
+          minimum: 0
+          examples: [812000000]
+        reservedBytes:
+          type: integer
+          minimum: 0
+          description: Bytes held by uploads still `pending` or being processed.
+          examples: [2483100]
+        limitBytes:
+          type: integer
+          minimum: 0
+          examples: [2147483648]
     Problem:
       type: object
       description: RFC 9457 problem document. `code` is the stable identifier; see `docs/reference/errors.md`.
@@ -627,6 +1515,15 @@ components:
             - rate-limited
             - network
             - internal
+            - vault-not-found
+            - vault-read-only
+            - upload-not-found
+            - upload-not-pending
+            - upload-missing
+            - upload-expired
+            - moment-not-found
+            - invalid-signature
+            - storage-unavailable
         requestId:
           type: string
           description: Same as the `X-Request-Id` header.
@@ -763,6 +1660,138 @@ components:
             status: 404
             detail: That sign-in option isn't available.
             code: provider-unavailable
+            requestId: ambar-api/Kf3n2m0001
+    StorageUnavailable:
+      description: Storage can't be reached, or isn't configured on this server (`storage-unavailable`). Try again after `Retry-After`.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+        Retry-After:
+          description: Seconds before trying again.
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://docs.ambar.page/errors/storage-unavailable
+            title: Storage unavailable
+            status: 503
+            detail: We can't reach storage right now. Try again in a moment.
+            code: storage-unavailable
+            requestId: ambar-api/Kf3n2m0001
+    MomentNotFound:
+      description: No moment with that id that the caller can see (`moment-not-found`).
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://docs.ambar.page/errors/moment-not-found
+            title: Moment not found
+            status: 404
+            detail: We couldn't find that moment.
+            code: moment-not-found
+            requestId: ambar-api/Kf3n2m0001
+    InvalidSignature:
+      description: The preview URL is expired, altered or signed with a retired key (`invalid-signature`). Read the moment again for a new one.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://docs.ambar.page/errors/invalid-signature
+            title: Invalid signature
+            status: 403
+            detail: This link has expired.
+            code: invalid-signature
+            requestId: ambar-api/Kf3n2m0001
+    VaultNotFound:
+      description: No vault with that id, or the caller isn't a member of it (`vault-not-found`). The two look the same on purpose.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://docs.ambar.page/errors/vault-not-found
+            title: Vault not found
+            status: 404
+            detail: We couldn't find that library.
+            code: vault-not-found
+            requestId: ambar-api/Kf3n2m0001
+    VaultReadOnly:
+      description: The caller can view this vault but not add to it (`vault-read-only`), or the origin is not allowed (`forbidden`).
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://docs.ambar.page/errors/vault-read-only
+            title: Vault read-only
+            status: 403
+            detail: You can view this library, but not add to it.
+            code: vault-read-only
+            requestId: ambar-api/Kf3n2m0001
+    UploadNotFound:
+      description: No upload with that id for the caller (`upload-not-found`).
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://docs.ambar.page/errors/upload-not-found
+            title: Upload not found
+            status: 404
+            detail: We couldn't find that upload.
+            code: upload-not-found
+            requestId: ambar-api/Kf3n2m0001
+    UploadConflict:
+      description: The file isn't in storage yet (`upload-missing`, `completeUpload`), or the upload is already past `pending` (`upload-not-pending`, `cancelUpload`).
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://docs.ambar.page/errors/upload-missing
+            title: Upload missing
+            status: 409
+            detail: The file hasn't finished uploading. Try again.
+            code: upload-missing
+            requestId: ambar-api/Kf3n2m0001
+    UploadExpired:
+      description: The upload slot ran out before it was completed (`upload-expired`). Ask for a new one with `createUploads`.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://docs.ambar.page/errors/upload-expired
+            title: Upload expired
+            status: 410
+            detail: That upload took too long. Try keeping the file again.
+            code: upload-expired
             requestId: ambar-api/Kf3n2m0001
     Internal:
       description: Unexpected server error (`internal`). The log line with the same `requestId` has the cause.

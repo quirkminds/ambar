@@ -56,6 +56,9 @@ jobs:
           go-version-file: apps/api/go.mod
           cache-dependency-path: apps/api/go.sum
 
+      # Photo processing runs libvips' command-line tools; without them its tests skip.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvips-tools
+
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun run lint

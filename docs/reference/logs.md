@@ -30,10 +30,20 @@ Handlers log significant events with `event` as a stable, dot-separated name. Gr
 | `auth.email_failed` | ERROR | `err` (sign-in email not sent) |
 | `auth.failed` | ERROR | `err` (unexpected error, answered with `internal`) |
 | `auth.cleanup` | INFO | `challenges`, `sessions` (expired rows deleted) |
+| `upload.reserved` | INFO | `user_id`, `accepted`, `duplicates`, `refused` (files in the request), `bytes` (reserved) |
+| `upload.completed` | INFO | `upload_id`, `bytes` |
+| `upload.processing` | INFO | `upload_id`, `attempt` (a worker leased it) |
+| `upload.ready` | INFO | `upload_id`, `attempt`, `moment_id` (the moment it became) |
+| `upload.duplicate` | INFO | `upload_id`, `attempt`, `moment_id` (already kept; nothing stored) |
+| `upload.retry` | WARN | `upload_id`, `attempt`, `err` (transient; taken again when the lease runs out, or another worker took it over) |
+| `upload.failed` | WARN | `upload_id`, `code` (`upload-mismatch`, `unreadable-file`, `access-revoked`; ERROR with `internal` after the last attempt) |
+| `upload.expired` | INFO | `expired` (pending uploads released), `deleted` (finished rows removed) |
+| `upload.storage_failed` | ERROR | Storage couldn't be reached (answered with `storage-unavailable`) |
+| `upload.error` | ERROR | `err` (unexpected error, answered with `internal`) |
 
 ## Never logged
 
-Emails, codes, tokens (including providers' access tokens and authorization codes), session IDs, request bodies, raw paths and query strings. If you need to correlate, use `request_id`.
+Emails, codes, tokens (including providers' access tokens and authorization codes), session IDs, request bodies, raw paths and query strings. For media: file names, fingerprints, and upload or media URLs (they carry signatures). If you need to correlate, use `request_id`.
 
 ## Correlating a user report
 
